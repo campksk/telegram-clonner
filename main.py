@@ -10,10 +10,11 @@ Flow:
 """
 
 import asyncio
+import json
 import logging
 import os
-import re
 import shutil
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -21,10 +22,6 @@ from telethon import TelegramClient, events
 from telethon.tl.functions.channels import (
     CreateForumTopicRequest,
     GetForumTopicsRequest,
-)
-from telethon.tl.types import (
-    MessageMediaDocument,
-    MessageMediaPhoto,
 )
 from telethon.errors import FloodWaitError, ChatAdminRequiredError
 
@@ -44,6 +41,23 @@ SEND_DELAY      = float(os.getenv("SEND_DELAY", "1.5"))
 SESSION_DIR = Path("./sessions")
 SESSION_DIR.mkdir(exist_ok=True)
 DOWNLOAD_DIR.mkdir(exist_ok=True)
+SENT_DB = Path("./sent_media.json")
+
+# ─── Sent-media DB (persist across restarts) ───────────────────────────────────
+def load_sent_db() -> dict[str, set]:
+    """โหลด {source_group_id_str: {msg_id, ...}} จากไฟล์"""
+    if not SENT_DB.exists():
+        return {}
+    try:
+        raw = json.loads(SENT_DB.read_text())
+        return {k: set(v) for k, v in raw.items()}
+    except Exception:
+        return {}
+
+def save_sent_db(db: dict[str, set]) -> None:
+    SENT_DB.write_text(json.dumps({k: list(v) for k, v in db.items()}))
+
+sent_db: dict[str, set] = load_sent_db()
 
 # ─── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -113,20 +127,32 @@ async def get_or_create_topic(group_title: str) -> int:
 
 
 # ─── Clone worker ──────────────────────────────────────────────────────────────
-async def clone_group(source_id: int, status_cb) -> None:
+async def clone_group(source: str | int, status_cb) -> None:
     """
-    ดึง media ทั้งหมดจาก source_id แล้วส่งไปยัง DEST_GROUP_ID/topic
-    status_cb(text) ใช้สำหรับส่งข้อความ progress กลับไปยัง bot chat
+    ดึง media จาก source (group_id, username, ชื่อกลุ่ม, หรือ user id/username)
+    แล้วส่งไปยัง DEST_GROUP_ID/topic
     """
-    # 1. หา entity ของ source group
+    # 1. Resolve entity — รองรับ int id, @username, ชื่อกลุ่ม/user
     try:
-        source_entity = await user_client.get_entity(source_id)
+        source_entity = await user_client.get_entity(source)
     except Exception as e:
-        await status_cb(f"❌ ไม่พบ group `{source_id}`\n`{e}`")
+        await status_cb(f"❌ ไม่พบ `{source}`\n`{e}`")
         return
 
-    group_title = getattr(source_entity, "title", str(source_id))
-    await status_cb(f"🔍 พบ group: **{group_title}**\nกำลังนับ media...")
+    # ดึงชื่อแสดงผล: group/channel ใช้ title, user ใช้ first_name [+ last_name]
+    from telethon.tl.types import User as TLUser, Channel, Chat
+    if isinstance(source_entity, TLUser):
+        parts = [source_entity.first_name or "", source_entity.last_name or ""]
+        group_title = " ".join(p for p in parts if p).strip() or str(source_entity.id)
+        entity_type = "user"
+    else:
+        group_title = getattr(source_entity, "title", str(source))
+        entity_type = "group/channel"
+
+    # canonical key สำหรับ sent_db → ใช้ numeric id เสมอ
+    src_key = str(source_entity.id)
+
+    await status_cb(f"🔍 พบ {entity_type}: **{group_title}**\nกำลังนับ media...")
 
     # 2. หา/สร้าง topic ปลายทาง
     try:
@@ -142,9 +168,11 @@ async def clone_group(source_id: int, status_cb) -> None:
     #    แต่ละ "batch" คือ List[Message] ที่ส่งพร้อมกัน
     #    - album (grouped_id ตรงกัน) → batch เดียว หลายไฟล์
     #    - single media (ไม่มี grouped_id) → batch เดียว 1 ไฟล์
+    already_sent: set = sent_db.get(src_key, set())
+
     raw_messages = []
     async for msg in user_client.iter_messages(source_entity, reverse=True):
-        if is_supported_media(msg):
+        if is_supported_media(msg) and msg.id not in already_sent:
             raw_messages.append(msg)
 
     # จัดกลุ่ม: รักษาลำดับ, album ต้องอยู่ติดกัน (Telegram รับประกันข้อนี้)
@@ -173,17 +201,20 @@ async def clone_group(source_id: int, status_cb) -> None:
     total_files  = len(raw_messages)
     total_batches = len(batches)
 
+    skipped = len(already_sent)
     if total_files == 0:
-        await status_cb("ℹ️ ไม่พบ media ใน group นี้")
+        msg_skip = f" (ข้ามไปแล้ว {skipped} ไฟล์)" if skipped else ""
+        await status_cb(f"ℹ️ ไม่มี media ใหม่ที่ต้องส่ง{msg_skip}")
         return
 
+    skip_note = f" | ข้ามที่ส่งแล้ว {skipped} ไฟล์" if skipped else ""
     await status_cb(
-        f"📦 พบ media ทั้งหมด **{total_files}** ไฟล์ ({total_batches} กลุ่ม)\n"
+        f"📦 พบ media ใหม่ **{total_files}** ไฟล์ ({total_batches} กลุ่ม){skip_note}\n"
         f"📤 กำลัง clone ไปยัง topic **{group_title}**..."
     )
 
     # 4. Download → Upload ทีละ batch
-    job_dir = DOWNLOAD_DIR / str(source_id)
+    job_dir = DOWNLOAD_DIR / str(source)
     job_dir.mkdir(parents=True, exist_ok=True)
     dest_entity = await user_client.get_entity(DEST_GROUP_ID)
 
@@ -225,6 +256,10 @@ async def clone_group(source_id: int, status_cb) -> None:
 
             success += len(batch)
             sent_files += len(batch)
+            # บันทึก msg_id ที่ส่งสำเร็จแล้ว
+            already_sent.update(m.id for m in batch)
+            sent_db[src_key] = already_sent
+            save_sent_db(sent_db)
 
         except FloodWaitError as e:
             log.warning(f"FloodWait {e.seconds}s — รอ...")
@@ -266,9 +301,15 @@ async def clone_group(source_id: int, status_cb) -> None:
     )
 
 
-# ─── Bot command handler ────────────────────────────────────────────────────────
-@bot_client.on(events.NewMessage(pattern=r"^clone\s+(-100\d+)$"))
+# ─── Bot command handlers ──────────────────────────────────────────────────────
+@bot_client.on(events.NewMessage(pattern=r"^clone(?:\s+(.*))?$"))
 async def handle_clone(event: events.NewMessage.Event):
+    """
+    รับคำสั่ง clone ทั้งหมด แล้วแยก branch เองในตัว
+    เหตุผล: Telethon match handler แรกที่ตรง ถ้าแยกเป็น 2 handler
+    pattern แรก "^clone (arg)$" match ก่อน แต่ Telethon
+    ยังคง fire handler ที่สองด้วย ทำให้ส่ง error message ซ้อน
+    """
     sender_id = event.sender_id
 
     # Access control
@@ -276,10 +317,31 @@ async def handle_clone(event: events.NewMessage.Event):
         await event.reply("⛔ คุณไม่มีสิทธิ์ใช้คำสั่งนี้")
         return
 
-    source_id = int(event.pattern_match.group(1))
+    arg = (event.pattern_match.group(1) or "").strip()
 
-    # ส่ง status กลับไปยัง chat เดิม
-    status_msg = await event.reply(f"🚀 เริ่ม clone จาก `{source_id}`...")
+    # ต้องมี argument
+    if not arg:
+        await event.reply(
+            "⚠️ ระบุ source ด้วย\n\n"
+            "รองรับ:\n"
+            "• `clone -1001234567890` — group/channel ID\n"
+            "• `clone @username` — username ของ group หรือ user\n"
+            "• `clone ชื่อกลุ่ม` — ค้นหาจากชื่อ (ต้องอยู่ใน group นั้นแล้ว)",
+            parse_mode="md",
+        )
+        return
+
+    # แปลง arg → ชนิดที่ถูกต้องสำหรับ get_entity
+    # - ตัวเลขล้วน หรือ -100xxx → int
+    # - @username หรือ ชื่อ → str (Telethon จัดการให้)
+    import re as _re
+    source: str | int
+    if _re.fullmatch(r"-?\d+", arg):
+        source = int(arg)
+    else:
+        source = arg  # @username หรือ ชื่อ/phone
+
+    status_msg = await event.reply(f"🚀 กำลังค้นหา `{arg}`...")
 
     async def status_cb(text: str):
         try:
@@ -287,19 +349,34 @@ async def handle_clone(event: events.NewMessage.Event):
         except Exception:
             await event.respond(text, parse_mode="md")
 
-    # รัน worker ใน background (ไม่ block event loop)
-    asyncio.create_task(clone_group(source_id, status_cb))
+    asyncio.create_task(clone_group(source, status_cb))
 
 
-@bot_client.on(events.NewMessage(pattern=r"^clone\s+"))
-async def handle_clone_bad_format(event):
-    """จับ clone ที่ format ผิด"""
+@bot_client.on(events.NewMessage(pattern=r"^ping$"))
+async def handle_ping(event: events.NewMessage.Event):
+    """ตรวจสอบสถานะ server"""
     if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS:
         return
+
+    import platform, psutil
+    cpu     = psutil.cpu_percent(interval=0.5)
+    ram     = psutil.virtual_memory()
+    disk    = psutil.disk_usage("/")
+    uptime  = int(time.time() - psutil.boot_time())
+    h, rem  = divmod(uptime, 3600)
+    m, s    = divmod(rem, 60)
+
+    # จำนวน source group ที่เคย clone แล้ว
+    total_tracked = sum(len(v) for v in sent_db.values())
+
     await event.reply(
-        "⚠️ รูปแบบไม่ถูกต้อง\n"
-        "ใช้: `clone -100xxxxxxxxxx`\n"
-        "ตัวอย่าง: `clone -1001234567890`",
+        f"🟢 **Server Status**\n"
+        f"├ 🖥 OS: `{platform.system()} {platform.machine()}`\n"
+        f"├ ⏱ Uptime: `{h}h {m}m {s}s`\n"
+        f"├ 🔥 CPU: `{cpu:.1f}%`\n"
+        f"├ 🧠 RAM: `{ram.used/1024**2:.0f} / {ram.total/1024**2:.0f} MB ({ram.percent:.1f}%)`\n"
+        f"├ 💾 Disk: `{disk.used/1024**3:.1f} / {disk.total/1024**3:.1f} GB ({disk.percent:.1f}%)`\n"
+        f"└ 📦 Media tracked: `{total_tracked}` ไฟล์ จาก {len(sent_db)} กลุ่ม",
         parse_mode="md",
     )
 

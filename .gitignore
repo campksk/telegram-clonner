@@ -1,3 +1,5 @@
 downloads
 sessions
 .env
+__pycache__
+sent_media.json
