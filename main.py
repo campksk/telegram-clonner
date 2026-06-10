@@ -214,7 +214,7 @@ async def clone_group(source: str | int, status_cb) -> None:
     )
 
     # 4. Download → Upload ทีละ batch
-    job_dir = DOWNLOAD_DIR / str(source)
+    job_dir = DOWNLOAD_DIR / str(source_entity.id)
     job_dir.mkdir(parents=True, exist_ok=True)
     dest_entity = await user_client.get_entity(DEST_GROUP_ID)
 
