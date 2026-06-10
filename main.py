@@ -59,6 +59,10 @@ def save_sent_db(db: dict[str, set]) -> None:
 
 sent_db: dict[str, set] = load_sent_db()
 
+# task ที่กำลังทำงานอยู่ → ใช้สำหรับ cancel
+# key = label string (เช่น source arg), value = asyncio.Task
+active_tasks: dict[str, asyncio.Task] = {}
+
 # ─── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -349,7 +353,77 @@ async def handle_clone(event: events.NewMessage.Event):
         except Exception:
             await event.respond(text, parse_mode="md")
 
-    asyncio.create_task(clone_group(source, status_cb))
+    task_key = str(arg)
+
+    # ถ้ามี task ของ source นี้วิ่งอยู่แล้ว ให้แจ้งและหยุด
+    if task_key in active_tasks and not active_tasks[task_key].done():
+        await event.reply(f"⚠️ `{arg}` กำลัง clone อยู่แล้ว พิมพ์ `cancel` เพื่อหยุด")
+        return
+
+    async def _run():
+        try:
+            await clone_group(source, status_cb)
+        except asyncio.CancelledError:
+            await status_cb(f"🛑 ยกเลิก clone `{arg}` แล้ว")
+        finally:
+            active_tasks.pop(task_key, None)
+
+    task = asyncio.create_task(_run())
+    active_tasks[task_key] = task
+
+
+@bot_client.on(events.NewMessage(pattern=r"^cancel(?:\s+(.*))?$"))
+async def handle_cancel(event: events.NewMessage.Event):
+    """ยกเลิก clone job ที่กำลังทำงานอยู่"""
+    if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS:
+        await event.reply("⛔ คุณไม่มีสิทธิ์ใช้คำสั่งนี้")
+        return
+
+    arg = (event.pattern_match.group(1) or "").strip()
+    running = {k: t for k, t in active_tasks.items() if not t.done()}
+
+    # ไม่มี job ทำงานอยู่เลย
+    if not running:
+        await event.reply("ℹ️ ไม่มี job ที่กำลังทำงานอยู่")
+        return
+
+    if arg:
+        # cancel เฉพาะ job ที่ระบุ
+        if arg not in running:
+            job_list = "\n".join(f"• `{k}`" for k in running)
+            await event.reply(
+                f"⚠️ ไม่พบ job `{arg}`\n\nJob ที่กำลังทำงาน:\n{job_list}",
+                parse_mode="md",
+            )
+            return
+        running[arg].cancel()
+        await event.reply(f"🛑 ส่งสัญญาณยกเลิก `{arg}` แล้ว")
+    else:
+        # cancel ทุก job
+        count = len(running)
+        for task in running.values():
+            task.cancel()
+        await event.reply(f"🛑 ส่งสัญญาณยกเลิกทั้งหมด {count} job แล้ว")
+
+
+@bot_client.on(events.NewMessage(pattern=r"^jobs$"))
+async def handle_jobs(event: events.NewMessage.Event):
+    """แสดง job ที่กำลังทำงานอยู่"""
+    if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS:
+        return
+
+    running = [k for k, t in active_tasks.items() if not t.done()]
+    if not running:
+        await event.reply("ℹ️ ไม่มี job ที่กำลังทำงานอยู่")
+        return
+
+    lines = "\n".join(f"• `{k}`" for k in running)
+    await event.reply(
+        f"⚙️ **Job ที่กำลังทำงาน ({len(running)})**\n{lines}\n\n"
+        f"ยกเลิกทั้งหมด: `cancel`\n"
+        f"ยกเลิกเฉพาะ: `cancel <source>`",
+        parse_mode="md",
+    )
 
 
 @bot_client.on(events.NewMessage(pattern=r"^ping$"))
