@@ -1,3 +1,3 @@
-pyrogram
-tgcrypto
-python-dotenv
+telethon==1.36.0
+python-dotenv==1.0.1
+aiofiles==23.2.1
