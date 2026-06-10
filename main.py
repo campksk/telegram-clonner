@@ -138,67 +138,118 @@ async def clone_group(source_id: int, status_cb) -> None:
         await status_cb(f"❌ สร้าง/หา topic ล้มเหลว: `{e}`")
         return
 
-    # 3. Collect message IDs ที่มี media
-    media_messages = []
+    # 3. Collect และจัดกลุ่ม messages ด้วย grouped_id
+    #    แต่ละ "batch" คือ List[Message] ที่ส่งพร้อมกัน
+    #    - album (grouped_id ตรงกัน) → batch เดียว หลายไฟล์
+    #    - single media (ไม่มี grouped_id) → batch เดียว 1 ไฟล์
+    raw_messages = []
     async for msg in user_client.iter_messages(source_entity, reverse=True):
         if is_supported_media(msg):
-            media_messages.append(msg)
+            raw_messages.append(msg)
 
-    total = len(media_messages)
-    if total == 0:
+    # จัดกลุ่ม: รักษาลำดับ, album ต้องอยู่ติดกัน (Telegram รับประกันข้อนี้)
+    batches: list[list] = []
+    album_buf: dict[int, list] = {}   # grouped_id → [msgs]
+    seen_albums: list[int] = []       # เก็บ order ของ album
+
+    for msg in raw_messages:
+        gid = msg.grouped_id
+        if gid:
+            if gid not in album_buf:
+                album_buf[gid] = []
+                seen_albums.append(gid)
+            album_buf[gid].append(msg)
+        else:
+            # flush album ที่ค้างก่อน (ถ้ามี) ตาม order
+            for aid in seen_albums:
+                batches.append(album_buf.pop(aid))
+            seen_albums.clear()
+            batches.append([msg])
+
+    # flush album ที่เหลือท้าย
+    for aid in seen_albums:
+        batches.append(album_buf.pop(aid))
+
+    total_files  = len(raw_messages)
+    total_batches = len(batches)
+
+    if total_files == 0:
         await status_cb("ℹ️ ไม่พบ media ใน group นี้")
         return
 
     await status_cb(
-        f"📦 พบ media ทั้งหมด **{total}** ไฟล์\n"
+        f"📦 พบ media ทั้งหมด **{total_files}** ไฟล์ ({total_batches} กลุ่ม)\n"
         f"📤 กำลัง clone ไปยัง topic **{group_title}**..."
     )
 
-    # 4. Download → Upload ทีละไฟล์
+    # 4. Download → Upload ทีละ batch
     job_dir = DOWNLOAD_DIR / str(source_id)
     job_dir.mkdir(parents=True, exist_ok=True)
     dest_entity = await user_client.get_entity(DEST_GROUP_ID)
 
-    success, failed = 0, 0
-    for i, msg in enumerate(media_messages, 1):
-        file_path = None
+    success, failed, sent_files = 0, 0, 0
+    for b_idx, batch in enumerate(batches, 1):
+        paths: list[str] = []
         try:
-            # Download
-            file_path = await user_client.download_media(msg, file=str(job_dir) + "/")
-            if not file_path:
-                raise ValueError("download_media returned None")
+            # Download ทุกไฟล์ใน batch (album download พร้อมกัน)
+            for msg in batch:
+                p = await user_client.download_media(msg, file=str(job_dir) + "/")
+                if not p:
+                    raise ValueError(f"download_media returned None (msg_id={msg.id})")
+                paths.append(p)
 
-            # Build caption (ข้อความต้นทาง ถ้ามี)
-            caption = msg.text or ""
+            # Caption: ใช้ข้อความจาก message สุดท้ายของ album (Telegram convention)
+            caption = batch[-1].text or ""
 
-            # Upload ไปยัง topic thread
-            await user_client.send_file(
-                dest_entity,
-                file=file_path,
-                caption=caption,
-                reply_to=thread_id,   # ← กำหนด thread (topic)
-                parse_mode="md",
-            )
-            success += 1
-            log.info(f"[{i}/{total}] ✓ {Path(file_path).name}")
+            if len(paths) == 1:
+                # Single file
+                await user_client.send_file(
+                    dest_entity,
+                    file=paths[0],
+                    caption=caption,
+                    reply_to=thread_id,
+                    parse_mode="md",
+                )
+            else:
+                # Album — ส่งพร้อมกันในข้อความเดียว
+                # captions เป็น list: ไฟล์แรกใส่ caption, ที่เหลือว่าง
+                captions = [caption] + [""] * (len(paths) - 1)
+                await user_client.send_file(
+                    dest_entity,
+                    file=paths,
+                    caption=captions,
+                    reply_to=thread_id,
+                    parse_mode="md",
+                )
+                log.info(f"[batch {b_idx}] album {len(paths)} ไฟล์ ✓")
+
+            success += len(batch)
+            sent_files += len(batch)
 
         except FloodWaitError as e:
             log.warning(f"FloodWait {e.seconds}s — รอ...")
             await asyncio.sleep(e.seconds + 2)
-            failed += 1
+            failed += len(batch)
 
         except Exception as e:
-            log.error(f"[{i}/{total}] ✗ {e}")
-            failed += 1
+            log.error(f"[batch {b_idx}] ✗ {e}")
+            failed += len(batch)
 
         finally:
-            # ลบไฟล์ชั่วคราวทันทีหลังส่ง
-            if file_path and Path(file_path).exists():
-                Path(file_path).unlink()
+            # ลบไฟล์ทั้ง batch ทันที
+            for p in paths:
+                try:
+                    Path(p).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
-        # Progress ทุก 10 ไฟล์
-        if i % 10 == 0 or i == total:
-            await status_cb(f"⏳ Progress: {i}/{total} (✓{success} ✗{failed})")
+        # Progress ทุก 10 batch
+        if b_idx % 10 == 0 or b_idx == total_batches:
+            await status_cb(
+                f"⏳ Progress: {sent_files + failed}/{total_files} ไฟล์ "
+                f"| {b_idx}/{total_batches} กลุ่ม "
+                f"(✓{success} ✗{failed})"
+            )
 
         await asyncio.sleep(SEND_DELAY)
 
@@ -209,8 +260,9 @@ async def clone_group(source_id: int, status_cb) -> None:
         f"✅ Clone เสร็จสิ้น!\n"
         f"• Group: **{group_title}**\n"
         f"• Topic: `{thread_id}`\n"
-        f"• สำเร็จ: {success}/{total}\n"
-        f"• ล้มเหลว: {failed}/{total}"
+        f"• สำเร็จ: {success}/{total_files} ไฟล์\n"
+        f"• ล้มเหลว: {failed}/{total_files} ไฟล์\n"
+        f"• Album ที่ส่งพร้อมกัน: {sum(1 for b in batches if len(b) > 1)} กลุ่ม"
     )
 
 
