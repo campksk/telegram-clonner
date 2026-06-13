@@ -99,6 +99,16 @@ logging.basicConfig(
 )
 log = logging.getLogger("clone-bot")
 
+# ปิด verbose log ของ Telethon (updates, gaps, connection noise)
+for _tl in (
+    "telethon",
+    "telethon.client.updates",
+    "telethon.client.uploads",
+    "telethon.network.mtprotosender",
+    "telethon.extensions.messagepacker",
+):
+    logging.getLogger(_tl).setLevel(logging.WARNING)
+
 # ─── Clients ───────────────────────────────────────────────────────────────────
 # bot_client  → รับคำสั่งจาก user
 # user_client → เข้าถึง group ส่วนตัว / download / upload
