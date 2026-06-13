@@ -37,6 +37,8 @@ ALLOWED_USERS   = set(
 )
 DOWNLOAD_DIR    = Path(os.getenv("DOWNLOAD_DIR", "./downloads"))
 SEND_DELAY      = float(os.getenv("SEND_DELAY", "1.5"))
+# จำนวน batch ที่ download+upload พร้อมกันได้ (ป้องกัน flood)
+PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "3"))
 
 SESSION_DIR = Path("./sessions")
 SESSION_DIR.mkdir(exist_ok=True)
@@ -78,20 +80,20 @@ bot_client  = TelegramClient(str(SESSION_DIR / "bot"),  API_ID, API_HASH)
 user_client = TelegramClient(str(SESSION_DIR / "user"), API_ID, API_HASH)
 
 # ─── Media type filter ─────────────────────────────────────────────────────────
-SUPPORTED_MIME_PREFIXES = ("image/", "video/", "audio/")
-SUPPORTED_MIME_EXACT    = {"application/ogg"}  # voice note บางรูปแบบ
+# MIME ที่ถือเป็นสติกเกอร์ → ข้ามเสมอ
+STICKER_MIMES = {"image/webp", "application/x-tgsticker"}
 
 def is_supported_media(msg) -> bool:
-    """คืน True ถ้า message มี media ที่ต้องการ clone"""
+    """คืน True ถ้า message มี media ที่ต้องการ clone (ยกเว้นสติกเกอร์)"""
+    if msg.sticker:          # attribute ตรง
+        return False
     if msg.photo:
         return True
     if msg.document:
         mime = (msg.document.mime_type or "").lower()
-        if any(mime.startswith(p) for p in SUPPORTED_MIME_PREFIXES):
-            return True
-        if mime in SUPPORTED_MIME_EXACT:
-            return True
-        # Document/file ทั่วไป (PDF, ZIP, ฯลฯ)
+        if mime in STICKER_MIMES:
+            return False     # ข้ามสติกเกอร์ทุกรูปแบบ
+        # Photo, Video, Audio, Voice, Document/file ทั่วไป → รับหมด
         return True
     return False
 
@@ -128,6 +130,18 @@ async def get_or_create_topic(group_title: str) -> int:
     thread_id = created.updates[0].id
     log.info(f"สร้าง topic สำเร็จ (thread_id={thread_id})")
     return thread_id
+
+
+# ─── Public group detection ────────────────────────────────────────────────────
+def is_public_entity(entity) -> bool:
+    """
+    คืน True ถ้า entity เป็น public group/channel
+    (มี username → forward ได้โดยไม่ต้อง download)
+    """
+    from telethon.tl.types import User as TLUser
+    if isinstance(entity, TLUser):
+        return False          # DM/user ไม่มี forward แบบ group
+    return bool(getattr(entity, "username", None))
 
 
 # ─── Clone worker ──────────────────────────────────────────────────────────────
@@ -212,96 +226,161 @@ async def clone_group(source: str | int, status_cb) -> None:
         return
 
     skip_note = f" | ข้ามที่ส่งแล้ว {skipped} ไฟล์" if skipped else ""
+
+    # 4. เลือก mode: forward (public) หรือ download→upload (private)
+    dest_entity = await user_client.get_entity(DEST_GROUP_ID)
+    use_forward = is_public_entity(source_entity)
+    mode_label  = "⚡ forward" if use_forward else f"📥 download→upload (workers={PARALLEL_WORKERS})"
     await status_cb(
         f"📦 พบ media ใหม่ **{total_files}** ไฟล์ ({total_batches} กลุ่ม){skip_note}\n"
-        f"📤 กำลัง clone ไปยัง topic **{group_title}**..."
+        f"📤 mode: {mode_label} → topic **{group_title}**..."
     )
 
-    # 4. Download → Upload ทีละ batch
-    job_dir = DOWNLOAD_DIR / str(source_entity.id)
-    job_dir.mkdir(parents=True, exist_ok=True)
-    dest_entity = await user_client.get_entity(DEST_GROUP_ID)
+    sem           = asyncio.Semaphore(PARALLEL_WORKERS)
+    counters      = {"success": 0, "failed": 0, "done": 0}
+    lock          = asyncio.Lock()
+    progress_lock = asyncio.Lock()
 
-    success, failed, sent_files = 0, 0, 0
-    for b_idx, batch in enumerate(batches, 1):
+    async def _update_progress() -> None:
+        done_now = counters["done"]
+        if done_now % 10 == 0 or done_now == total_batches:
+            async with progress_lock:
+                await status_cb(
+                    f"⏳ Progress: {counters['success'] + counters['failed']}/{total_files} ไฟล์ "
+                    f"| {done_now}/{total_batches} กลุ่ม "
+                    f"(✓{counters['success']} ✗{counters['failed']})"
+                )
+
+    async def process_batch_forward(b_idx: int, batch: list) -> None:
+        """
+        Forward mode (public source) — server-side copy, เร็วมาก
+        forward_messages() ส่งได้ครั้งละหลาย id พร้อมกัน (album-safe)
+        """
+        async with sem:
+            try:
+                msg_ids = [m.id for m in batch]
+                await user_client.forward_messages(
+                    entity=dest_entity,
+                    messages=msg_ids,
+                    from_peer=source_entity,
+                    # reply_to ใน forward_messages ต้องใช้ SendMessageRequest
+                    # workaround: pin thread ด้วย reply ทีหลังไม่ได้
+                    # → ใช้ message thread_id ผ่าน top_msg_id
+                    top_msg_id=thread_id,
+                )
+                async with lock:
+                    counters["success"] += len(batch)
+                    already_sent.update(m.id for m in batch)
+                    sent_db[src_key] = already_sent
+                    save_sent_db(sent_db)
+                log.info(f"[fwd batch {b_idx}] {len(batch)} ไฟล์ ✓")
+
+            except FloodWaitError as e:
+                log.warning(f"[fwd batch {b_idx}] FloodWait {e.seconds}s")
+                await asyncio.sleep(e.seconds + 2)
+                async with lock:
+                    counters["failed"] += len(batch)
+
+            except asyncio.CancelledError:
+                raise
+
+            except Exception as e:
+                log.error(f"[fwd batch {b_idx}] ✗ {e}")
+                async with lock:
+                    counters["failed"] += len(batch)
+
+            finally:
+                async with lock:
+                    counters["done"] += 1
+                await _update_progress()
+                await asyncio.sleep(SEND_DELAY / PARALLEL_WORKERS)
+
+    async def process_batch_upload(b_idx: int, batch: list) -> None:
+        """Download → upload 1 batch ภายใต้ semaphore"""
         paths: list[str] = []
-        try:
-            # Download ทุกไฟล์ใน batch (album download พร้อมกัน)
-            for msg in batch:
-                p = await user_client.download_media(msg, file=str(job_dir) + "/")
-                if not p:
-                    raise ValueError(f"download_media returned None (msg_id={msg.id})")
-                paths.append(p)
+        async with sem:
+            try:
+                for msg in batch:
+                    p = await user_client.download_media(msg, file=str(job_dir) + "/")
+                    if not p:
+                        raise ValueError(f"download_media returned None (msg_id={msg.id})")
+                    paths.append(p)
 
-            # Caption: ใช้ข้อความจาก message สุดท้ายของ album (Telegram convention)
-            caption = batch[-1].text or ""
+                caption = batch[-1].text or ""
+                if len(paths) == 1:
+                    await user_client.send_file(
+                        dest_entity,
+                        file=paths[0],
+                        caption=caption,
+                        reply_to=thread_id,
+                        parse_mode="md",
+                    )
+                else:
+                    captions = [caption] + [""] * (len(paths) - 1)
+                    await user_client.send_file(
+                        dest_entity,
+                        file=paths,
+                        caption=captions,
+                        reply_to=thread_id,
+                        parse_mode="md",
+                    )
+                    log.info(f"[up batch {b_idx}] album {len(paths)} ไฟล์ ✓")
 
-            if len(paths) == 1:
-                # Single file
-                await user_client.send_file(
-                    dest_entity,
-                    file=paths[0],
-                    caption=caption,
-                    reply_to=thread_id,
-                    parse_mode="md",
-                )
-            else:
-                # Album — ส่งพร้อมกันในข้อความเดียว
-                # captions เป็น list: ไฟล์แรกใส่ caption, ที่เหลือว่าง
-                captions = [caption] + [""] * (len(paths) - 1)
-                await user_client.send_file(
-                    dest_entity,
-                    file=paths,
-                    caption=captions,
-                    reply_to=thread_id,
-                    parse_mode="md",
-                )
-                log.info(f"[batch {b_idx}] album {len(paths)} ไฟล์ ✓")
+                async with lock:
+                    counters["success"] += len(batch)
+                    already_sent.update(m.id for m in batch)
+                    sent_db[src_key] = already_sent
+                    save_sent_db(sent_db)
 
-            success += len(batch)
-            sent_files += len(batch)
-            # บันทึก msg_id ที่ส่งสำเร็จแล้ว
-            already_sent.update(m.id for m in batch)
-            sent_db[src_key] = already_sent
-            save_sent_db(sent_db)
+            except FloodWaitError as e:
+                log.warning(f"[up batch {b_idx}] FloodWait {e.seconds}s — รอ...")
+                await asyncio.sleep(e.seconds + 2)
+                async with lock:
+                    counters["failed"] += len(batch)
 
-        except FloodWaitError as e:
-            log.warning(f"FloodWait {e.seconds}s — รอ...")
-            await asyncio.sleep(e.seconds + 2)
-            failed += len(batch)
+            except asyncio.CancelledError:
+                raise
 
-        except Exception as e:
-            log.error(f"[batch {b_idx}] ✗ {e}")
-            failed += len(batch)
+            except Exception as e:
+                log.error(f"[up batch {b_idx}] ✗ {e}")
+                async with lock:
+                    counters["failed"] += len(batch)
 
-        finally:
-            # ลบไฟล์ทั้ง batch ทันที
-            for p in paths:
-                try:
-                    Path(p).unlink(missing_ok=True)
-                except Exception:
-                    pass
+            finally:
+                for p in paths:
+                    try:
+                        Path(p).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                async with lock:
+                    counters["done"] += 1
+                await _update_progress()
+                await asyncio.sleep(SEND_DELAY / PARALLEL_WORKERS)
 
-        # Progress ทุก 10 batch
-        if b_idx % 10 == 0 or b_idx == total_batches:
-            await status_cb(
-                f"⏳ Progress: {sent_files + failed}/{total_files} ไฟล์ "
-                f"| {b_idx}/{total_batches} กลุ่ม "
-                f"(✓{success} ✗{failed})"
-            )
+    # เลือก coroutine ตาม mode แล้วรันพร้อมกัน
+    process_fn = process_batch_forward if use_forward else process_batch_upload
+    job_dir    = DOWNLOAD_DIR / str(source_entity.id)
+    if not use_forward:
+        job_dir.mkdir(parents=True, exist_ok=True)
 
-        await asyncio.sleep(SEND_DELAY)
+    await asyncio.gather(*[
+        process_fn(i, batch)
+        for i, batch in enumerate(batches, 1)
+    ])
 
-    # 5. Cleanup folder
-    shutil.rmtree(job_dir, ignore_errors=True)
+    # 5. Cleanup (upload mode เท่านั้น)
+    if not use_forward:
+        shutil.rmtree(job_dir, ignore_errors=True)
 
+    album_count = sum(1 for b in batches if len(b) > 1)
     await status_cb(
         f"✅ Clone เสร็จสิ้น!\n"
         f"• Group: **{group_title}**\n"
+        f"• Mode: {mode_label}\n"
         f"• Topic: `{thread_id}`\n"
-        f"• สำเร็จ: {success}/{total_files} ไฟล์\n"
-        f"• ล้มเหลว: {failed}/{total_files} ไฟล์\n"
-        f"• Album ที่ส่งพร้อมกัน: {sum(1 for b in batches if len(b) > 1)} กลุ่ม"
+        f"• สำเร็จ: {counters['success']}/{total_files} ไฟล์\n"
+        f"• ล้มเหลว: {counters['failed']}/{total_files} ไฟล์\n"
+        f"• Album: {album_count} กลุ่ม"
     )
 
 
