@@ -61,6 +61,32 @@ def save_sent_db(db: dict[str, set]) -> None:
 
 sent_db: dict[str, set] = load_sent_db()
 
+JOBS_DB = Path("./pending_jobs.json")
+
+# ─── Pending jobs DB (resume หลัง crash/restart) ───────────────────────────────
+def load_pending_jobs() -> list[dict]:
+    """โหลด jobs ที่ค้างอยู่ก่อน crash"""
+    if not JOBS_DB.exists():
+        return []
+    try:
+        return json.loads(JOBS_DB.read_text())
+    except Exception:
+        return []
+
+def save_pending_jobs(jobs: list[dict]) -> None:
+    JOBS_DB.write_text(json.dumps(jobs, ensure_ascii=False))
+
+def add_pending_job(source_arg: str) -> None:
+    jobs = load_pending_jobs()
+    if not any(j["source"] == source_arg for j in jobs):
+        jobs.append({"source": source_arg})
+        save_pending_jobs(jobs)
+
+def remove_pending_job(source_arg: str) -> None:
+    jobs = [j for j in load_pending_jobs() if j["source"] != source_arg]
+    save_pending_jobs(jobs)
+
+
 # task ที่กำลังทำงานอยู่ → ใช้สำหรับ cancel
 # key = label string (เช่น source arg), value = asyncio.Task
 active_tasks: dict[str, asyncio.Task] = {}
@@ -384,8 +410,158 @@ async def clone_group(source: str | int, status_cb) -> None:
     )
 
 
+# ─── Single message clone (จากลิงก์) ──────────────────────────────────────────
+import re as _link_re
+
+# รองรับ:
+#   https://t.me/username/123
+#   https://t.me/c/1234567890/123        (private)
+#   https://t.me/username/123?single     (single item ใน album)
+_TG_LINK_RE = _link_re.compile(
+    r"https?://t\.me/"
+    r"(?:(?P<username>[^/c][^/]*)/(?P<msg_id>\d+)"   # public
+    r"|c/(?P<chat_id>\d+)/(?P<priv_msg_id>\d+))"     # private
+)
+
+def parse_tg_link(url: str) -> tuple[str | int, int] | None:
+    """
+    แยก (chat_identifier, msg_id) จากลิงก์ Telegram
+    คืน None ถ้าไม่ใช่ลิงก์ที่รู้จัก
+    """
+    m = _TG_LINK_RE.search(url)
+    if not m:
+        return None
+    if m.group("username"):
+        return m.group("username"), int(m.group("msg_id"))
+    else:
+        # private link: chat_id เป็น bare id (ไม่มี -100 prefix)
+        return int("-100" + m.group("chat_id")), int(m.group("priv_msg_id"))
+
+
+async def clone_single_message(
+    chat: str | int,
+    msg_id: int,
+    dest_topic_override: str | None,
+    status_cb,
+) -> None:
+    """
+    ดึงเฉพาะ message เดียว (หรือ album ที่มี msg_id นั้น) แล้วส่งไปยัง dest group/topic
+    dest_topic_override: ถ้า None → ใช้ชื่อ chat เป็นชื่อ topic
+    """
+    # Resolve chat entity
+    try:
+        chat_entity = await user_client.get_entity(chat)
+    except Exception as e:
+        await status_cb(f"❌ ไม่พบ chat `{chat}`\n`{e}`")
+        return
+
+    from telethon.tl.types import User as TLUser
+    if isinstance(chat_entity, TLUser):
+        parts = [chat_entity.first_name or "", chat_entity.last_name or ""]
+        chat_title = " ".join(p for p in parts if p).strip() or str(chat_entity.id)
+    else:
+        chat_title = getattr(chat_entity, "title", str(chat))
+
+    topic_name = dest_topic_override or chat_title
+
+    # หา/สร้าง topic
+    try:
+        thread_id = await get_or_create_topic(topic_name)
+    except ChatAdminRequiredError:
+        await status_cb("❌ บอทต้องเป็น admin ใน destination group และเปิด Topics ด้วย")
+        return
+    except Exception as e:
+        await status_cb(f"❌ สร้าง/หา topic ล้มเหลว: `{e}`")
+        return
+
+    # ดึง message
+    msgs = await user_client.get_messages(chat_entity, ids=msg_id)
+    if not msgs:
+        await status_cb(f"❌ ไม่พบ message id `{msg_id}` ใน `{chat_title}`")
+        return
+
+    msg = msgs if not isinstance(msgs, list) else msgs[0]
+    if not msg:
+        await status_cb(f"❌ ไม่พบ message id `{msg_id}`")
+        return
+
+    # ถ้า message นี้เป็นส่วนหนึ่งของ album → ดึงทั้ง album
+    batch: list = []
+    if msg.grouped_id:
+        async for m in user_client.iter_messages(
+            chat_entity,
+            min_id=msg_id - 20,   # album มักอยู่ใกล้กัน
+            max_id=msg_id + 20,
+        ):
+            if m.grouped_id == msg.grouped_id and is_supported_media(m):
+                batch.append(m)
+        batch.sort(key=lambda m: m.id)   # เรียงตาม id
+    elif is_supported_media(msg):
+        batch = [msg]
+    else:
+        await status_cb(f"⚠️ Message `{msg_id}` ไม่มี media ที่รองรับ")
+        return
+
+    await status_cb(
+        f"🔍 พบ: **{chat_title}** — message `{msg_id}`\n"
+        f"📦 {'album ' + str(len(batch)) + ' ไฟล์' if len(batch) > 1 else '1 ไฟล์'}\n"
+        f"📤 กำลังส่ง → topic **{topic_name}**..."
+    )
+
+    dest_entity = await user_client.get_entity(DEST_GROUP_ID)
+    use_forward = is_public_entity(chat_entity)
+
+    try:
+        if use_forward:
+            await user_client.forward_messages(
+                entity=dest_entity,
+                messages=[m.id for m in batch],
+                from_peer=chat_entity,
+                top_msg_id=thread_id,
+            )
+        else:
+            job_dir = DOWNLOAD_DIR / f"single_{chat_entity.id}_{msg_id}"
+            job_dir.mkdir(parents=True, exist_ok=True)
+            paths = []
+            try:
+                for m in batch:
+                    p = await user_client.download_media(m, file=str(job_dir) + "/")
+                    if p:
+                        paths.append(p)
+                caption = batch[-1].text or ""
+                if len(paths) == 1:
+                    await user_client.send_file(
+                        dest_entity, file=paths[0],
+                        caption=caption, reply_to=thread_id, parse_mode="md",
+                    )
+                else:
+                    captions = [caption] + [""] * (len(paths) - 1)
+                    await user_client.send_file(
+                        dest_entity, file=paths,
+                        caption=captions, reply_to=thread_id, parse_mode="md",
+                    )
+            finally:
+                shutil.rmtree(job_dir, ignore_errors=True)
+
+        mode = "⚡ forward" if use_forward else "📥 upload"
+        await status_cb(
+            f"✅ ส่งสำเร็จ!\n"
+            f"• Chat: **{chat_title}**\n"
+            f"• Message ID: `{msg_id}`\n"
+            f"• ไฟล์: {len(batch)}\n"
+            f"• Mode: {mode}\n"
+            f"• Topic: **{topic_name}**"
+        )
+
+    except FloodWaitError as e:
+        await asyncio.sleep(e.seconds + 2)
+        await status_cb(f"❌ FloodWait {e.seconds}s — ลองใหม่อีกครั้ง")
+    except Exception as e:
+        await status_cb(f"❌ ส่งล้มเหลว: `{e}`")
+
+
 # ─── Bot command handlers ──────────────────────────────────────────────────────
-@bot_client.on(events.NewMessage(pattern=r"^clone(?:\s+(.*))?$"))
+@bot_client.on(events.NewMessage(pattern=r"^/clone(?:\s+(.*))?$"))
 async def handle_clone(event: events.NewMessage.Event):
     """
     รับคำสั่ง clone ทั้งหมด แล้วแยก branch เองในตัว
@@ -407,22 +583,16 @@ async def handle_clone(event: events.NewMessage.Event):
         await event.reply(
             "⚠️ ระบุ source ด้วย\n\n"
             "รองรับ:\n"
-            "• `clone -1001234567890` — group/channel ID\n"
-            "• `clone @username` — username ของ group หรือ user\n"
-            "• `clone ชื่อกลุ่ม` — ค้นหาจากชื่อ (ต้องอยู่ใน group นั้นแล้ว)",
+            "• `/clone -1001234567890` — group/channel ID\n"
+            "• `/clone @username` — username ของ group หรือ user\n"
+            "• `/clone ชื่อกลุ่ม` — ค้นหาจากชื่อ\n"
+            "• `/clone https://t.me/username/123` — เฉพาะ message นั้น\n"
+            "• `/clone https://t.me/c/123456/789` — private message",
             parse_mode="md",
         )
         return
 
-    # แปลง arg → ชนิดที่ถูกต้องสำหรับ get_entity
-    # - ตัวเลขล้วน หรือ -100xxx → int
-    # - @username หรือ ชื่อ → str (Telethon จัดการให้)
     import re as _re
-    source: str | int
-    if _re.fullmatch(r"-?\d+", arg):
-        source = int(arg)
-    else:
-        source = arg  # @username หรือ ชื่อ/phone
 
     status_msg = await event.reply(f"🚀 กำลังค้นหา `{arg}`...")
 
@@ -432,26 +602,44 @@ async def handle_clone(event: events.NewMessage.Event):
         except Exception:
             await event.respond(text, parse_mode="md")
 
+    # ── ตรวจว่าเป็นลิงก์ t.me หรือเปล่า ──────────────────────────────────────
+    link_parsed = parse_tg_link(arg)
+    if link_parsed:
+        chat_ref, msg_id = link_parsed
+        # single message clone — ไม่ใส่ active_tasks/pending (เร็วมาก)
+        asyncio.create_task(
+            clone_single_message(chat_ref, msg_id, None, status_cb)
+        )
+        return
+
+    # ── Clone ทั้ง group/user (เดิม) ──────────────────────────────────────────
+    source: str | int
+    if _re.fullmatch(r"-?\d+", arg):
+        source = int(arg)
+    else:
+        source = arg
+
     task_key = str(arg)
 
-    # ถ้ามี task ของ source นี้วิ่งอยู่แล้ว ให้แจ้งและหยุด
     if task_key in active_tasks and not active_tasks[task_key].done():
-        await event.reply(f"⚠️ `{arg}` กำลัง clone อยู่แล้ว พิมพ์ `cancel` เพื่อหยุด")
+        await event.reply(f"⚠️ `{arg}` กำลัง clone อยู่แล้ว พิมพ์ `/cancel` เพื่อหยุด")
         return
 
     async def _run():
+        add_pending_job(task_key)
         try:
             await clone_group(source, status_cb)
         except asyncio.CancelledError:
             await status_cb(f"🛑 ยกเลิก clone `{arg}` แล้ว")
         finally:
+            remove_pending_job(task_key)
             active_tasks.pop(task_key, None)
 
     task = asyncio.create_task(_run())
     active_tasks[task_key] = task
 
 
-@bot_client.on(events.NewMessage(pattern=r"^cancel(?:\s+(.*))?$"))
+@bot_client.on(events.NewMessage(pattern=r"^/cancel(?:\s+(.*))?$"))
 async def handle_cancel(event: events.NewMessage.Event):
     """ยกเลิก clone job ที่กำลังทำงานอยู่"""
     if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS:
@@ -485,7 +673,7 @@ async def handle_cancel(event: events.NewMessage.Event):
         await event.reply(f"🛑 ส่งสัญญาณยกเลิกทั้งหมด {count} job แล้ว")
 
 
-@bot_client.on(events.NewMessage(pattern=r"^jobs$"))
+@bot_client.on(events.NewMessage(pattern=r"^/jobs$"))
 async def handle_jobs(event: events.NewMessage.Event):
     """แสดง job ที่กำลังทำงานอยู่"""
     if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS:
@@ -505,7 +693,7 @@ async def handle_jobs(event: events.NewMessage.Event):
     )
 
 
-@bot_client.on(events.NewMessage(pattern=r"^ping$"))
+@bot_client.on(events.NewMessage(pattern=r"^/ping$"))
 async def handle_ping(event: events.NewMessage.Event):
     """ตรวจสอบสถานะ server"""
     if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS:
@@ -545,7 +733,74 @@ async def main():
     me = await bot_client.get_me()
     log.info(f"Bot พร้อม: @{me.username}")
 
-    log.info("✅ ระบบพร้อมรับคำสั่ง clone")
+    # Register slash commands (แสดงใน menu ของ Telegram)
+    from telethon.tl.functions.bots import SetBotCommandsRequest
+    from telethon.tl.types import BotCommand, BotCommandScopeDefault
+    await bot_client(SetBotCommandsRequest(
+        scope=BotCommandScopeDefault(),
+        lang_code="",
+        commands=[
+            BotCommand(command="clone",  description="Clone media จาก group/user"),
+            BotCommand(command="cancel", description="ยกเลิก job (ทั้งหมด หรือระบุ source)"),
+            BotCommand(command="jobs",   description="ดู job ที่กำลังทำงานอยู่"),
+            BotCommand(command="ping",   description="ตรวจสอบสถานะ server"),
+        ],
+    ))
+    log.info("Slash commands registered")
+
+    # Resume pending jobs ที่ค้างจาก crash/restart
+    pending = load_pending_jobs()
+    if pending:
+        log.info(f"พบ {len(pending)} pending job — กำลัง resume...")
+        for job in pending:
+            src_arg = job["source"]
+            import re as _re
+            source: str | int = int(src_arg) if _re.fullmatch(r"-?\d+", src_arg) else src_arg
+
+            # สร้าง status_cb ที่ log แทน reply (ไม่มี chat context)
+            async def make_log_cb(label: str):
+                async def _cb(text: str):
+                    log.info(f"[resume:{label}] {text}")
+                return _cb
+
+            cb = await make_log_cb(src_arg)
+
+            # แจ้ง ALLOWED_USERS คนแรก (ถ้ามี) ว่า resume แล้ว
+            if ALLOWED_USERS:
+                notify_user = next(iter(ALLOWED_USERS))
+                try:
+                    notify_msg = await bot_client.send_message(
+                        notify_user,
+                        f"♻️ **Resume job:** `{src_arg}`\nระบบ restart — กำลังทำงานต่อจากเดิม...",
+                        parse_mode="md",
+                    )
+                    async def make_chat_cb(msg):
+                        async def _cb(text: str):
+                            try:
+                                await msg.edit(text, parse_mode="md")
+                            except Exception:
+                                await bot_client.send_message(notify_user, text, parse_mode="md")
+                        return _cb
+                    cb = await make_chat_cb(notify_msg)
+                except Exception as e:
+                    log.warning(f"ไม่สามารถแจ้ง user ได้: {e}")
+
+            task_key = src_arg
+            async def _resume_run(s=source, c=cb, k=task_key):
+                add_pending_job(k)
+                try:
+                    await clone_group(s, c)
+                except asyncio.CancelledError:
+                    await c(f"🛑 ยกเลิก clone `{k}` แล้ว")
+                finally:
+                    remove_pending_job(k)
+                    active_tasks.pop(k, None)
+
+            task = asyncio.create_task(_resume_run())
+            active_tasks[task_key] = task
+            log.info(f"Resume: {src_arg}")
+
+    log.info("✅ ระบบพร้อมรับคำสั่ง")
     await bot_client.run_until_disconnected()
 
 
