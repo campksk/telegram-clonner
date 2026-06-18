@@ -170,22 +170,11 @@ async def get_or_create_topic(group_title: str) -> int:
 
 # ─── Public group detection ────────────────────────────────────────────────────
 def is_public_entity(entity) -> bool:
-    """
-    คืน True ถ้า forward ได้โดยไม่ต้อง download:
-    - ต้องมี username (public)
-    - ต้องไม่มี noforwards flag (content protection)
-    """
+    """คืน True ถ้า forward ได้ (noforwards=False)"""
     from telethon.tl.types import User as TLUser
     if isinstance(entity, TLUser):
         return False
-    has_username  = bool(getattr(entity, "username", None))
-    no_fwd_flag   = bool(getattr(entity, "noforwards", False))
-    result = has_username and not no_fwd_flag
-    log.debug(
-        f"is_public_entity({getattr(entity,'title', entity.__class__.__name__)!r}): "
-        f"username={has_username} noforwards={no_fwd_flag} → {result}"
-    )
-    return result
+    return not bool(getattr(entity, "noforwards", False))
 
 
 # ─── Clone worker ──────────────────────────────────────────────────────────────
@@ -441,33 +430,28 @@ _TG_LINK_RE = _link_re.compile(
     r"|c/(?P<chat_id>\d+)/(?P<priv_msg_id>\d+))"     # private
 )
 
-def parse_tg_link(url: str) -> tuple[str | int, int, bool] | None:
+def parse_tg_link(url: str) -> tuple[str | int, int] | None:
     """
-    แยก (chat_identifier, msg_id, is_public_link) จากลิงก์ Telegram
-    is_public_link=True หมายความว่า link มี username → forward ได้แน่นอน
+    แยก (chat_identifier, msg_id) จากลิงก์ Telegram
     คืน None ถ้าไม่ใช่ลิงก์ที่รู้จัก
     """
     m = _TG_LINK_RE.search(url)
     if not m:
         return None
     if m.group("username"):
-        # t.me/username/123 → public link, forward ได้เสมอ (ยกเว้น noforwards flag)
-        return m.group("username"), int(m.group("msg_id")), True
+        return m.group("username"), int(m.group("msg_id"))
     else:
-        # t.me/c/xxx/123 → private link, ต้อง download
-        return int("-100" + m.group("chat_id")), int(m.group("priv_msg_id")), False
+        return int("-100" + m.group("chat_id")), int(m.group("priv_msg_id"))
 
 
 async def clone_single_message(
     chat: str | int,
     msg_id: int,
-    is_public_link: bool,
     dest_topic_override: str | None,
     status_cb,
 ) -> None:
     """
     ดึงเฉพาะ message เดียว (หรือ album ที่มี msg_id นั้น) แล้วส่งไปยัง dest group/topic
-    is_public_link: True = ลิงก์มี username → ใช้ forward, False = private → upload
     dest_topic_override: ถ้า None → ใช้ชื่อ chat เป็นชื่อ topic
     """
     # Resolve chat entity
@@ -531,15 +515,10 @@ async def clone_single_message(
     )
 
     dest_entity = await user_client.get_entity(DEST_GROUP_ID)
-    # ตัดสินใจจาก 2 เงื่อนไข:
-    # 1. is_public_link  → ลิงก์มี username (public) → forward ได้
-    # 2. noforwards flag → channel ปิด content protection → forward ไม่ได้
-    no_fwd_flag = bool(getattr(chat_entity, "noforwards", False))
-    use_forward = is_public_link and not no_fwd_flag
+    use_forward = is_public_entity(chat_entity)
     log.info(
         f"[single] chat={chat_title!r} "
-        f"is_public_link={is_public_link} "
-        f"noforwards={no_fwd_flag} "
+        f"noforwards={getattr(chat_entity,'noforwards',False)} "
         f"→ mode={'forward' if use_forward else 'upload'}"
     )
 
@@ -648,10 +627,10 @@ async def handle_clone(event: events.NewMessage.Event):
     # ── ตรวจว่าเป็นลิงก์ t.me หรือเปล่า ──────────────────────────────────────
     link_parsed = parse_tg_link(arg)
     if link_parsed:
-        chat_ref, msg_id, is_public_link = link_parsed
+        chat_ref, msg_id, _ = link_parsed
         # single message clone — ไม่ใส่ active_tasks/pending (เร็วมาก)
         asyncio.create_task(
-            clone_single_message(chat_ref, msg_id, is_public_link, None, status_cb)
+            clone_single_message(chat_ref, msg_id, None, status_cb)
         )
         return
 
