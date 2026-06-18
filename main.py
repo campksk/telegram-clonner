@@ -171,13 +171,21 @@ async def get_or_create_topic(group_title: str) -> int:
 # ─── Public group detection ────────────────────────────────────────────────────
 def is_public_entity(entity) -> bool:
     """
-    คืน True ถ้า entity เป็น public group/channel
-    (มี username → forward ได้โดยไม่ต้อง download)
+    คืน True ถ้า forward ได้โดยไม่ต้อง download:
+    - ต้องมี username (public)
+    - ต้องไม่มี noforwards flag (content protection)
     """
     from telethon.tl.types import User as TLUser
     if isinstance(entity, TLUser):
-        return False          # DM/user ไม่มี forward แบบ group
-    return bool(getattr(entity, "username", None))
+        return False
+    has_username  = bool(getattr(entity, "username", None))
+    no_fwd_flag   = bool(getattr(entity, "noforwards", False))
+    result = has_username and not no_fwd_flag
+    log.debug(
+        f"is_public_entity({getattr(entity,'title', entity.__class__.__name__)!r}): "
+        f"username={has_username} noforwards={no_fwd_flag} → {result}"
+    )
+    return result
 
 
 # ─── Clone worker ──────────────────────────────────────────────────────────────
@@ -520,46 +528,63 @@ async def clone_single_message(
 
     dest_entity = await user_client.get_entity(DEST_GROUP_ID)
     use_forward = is_public_entity(chat_entity)
+    log.info(
+        f"[single] chat={chat_title!r} "
+        f"username={getattr(chat_entity,'username',None)!r} "
+        f"noforwards={getattr(chat_entity,'noforwards',None)} "
+        f"→ mode={'forward' if use_forward else 'upload'}"
+    )
+
+    async def _do_upload(dest, batch_, thread_id_, chat_entity_, msg_id_):
+        """Download → upload fallback"""
+        job_dir = DOWNLOAD_DIR / f"single_{chat_entity_.id}_{msg_id_}"
+        job_dir.mkdir(parents=True, exist_ok=True)
+        paths = []
+        try:
+            for m in batch_:
+                p = await user_client.download_media(m, file=str(job_dir) + "/")
+                if p:
+                    paths.append(p)
+            caption = batch_[-1].text or ""
+            if len(paths) == 1:
+                await user_client.send_file(
+                    dest, file=paths[0],
+                    caption=caption, reply_to=thread_id_, parse_mode="md",
+                )
+            else:
+                captions = [caption] + [""] * (len(paths) - 1)
+                await user_client.send_file(
+                    dest, file=paths,
+                    caption=captions, reply_to=thread_id_, parse_mode="md",
+                )
+        finally:
+            shutil.rmtree(job_dir, ignore_errors=True)
 
     try:
+        actual_mode = "📥 upload"
         if use_forward:
-            await user_client.forward_messages(
-                entity=dest_entity,
-                messages=[m.id for m in batch],
-                from_peer=chat_entity,
-                top_msg_id=thread_id,
-            )
-        else:
-            job_dir = DOWNLOAD_DIR / f"single_{chat_entity.id}_{msg_id}"
-            job_dir.mkdir(parents=True, exist_ok=True)
-            paths = []
             try:
-                for m in batch:
-                    p = await user_client.download_media(m, file=str(job_dir) + "/")
-                    if p:
-                        paths.append(p)
-                caption = batch[-1].text or ""
-                if len(paths) == 1:
-                    await user_client.send_file(
-                        dest_entity, file=paths[0],
-                        caption=caption, reply_to=thread_id, parse_mode="md",
-                    )
-                else:
-                    captions = [caption] + [""] * (len(paths) - 1)
-                    await user_client.send_file(
-                        dest_entity, file=paths,
-                        caption=captions, reply_to=thread_id, parse_mode="md",
-                    )
-            finally:
-                shutil.rmtree(job_dir, ignore_errors=True)
+                await user_client.forward_messages(
+                    entity=dest_entity,
+                    messages=[m.id for m in batch],
+                    from_peer=chat_entity,
+                    top_msg_id=thread_id,
+                )
+                actual_mode = "⚡ forward"
+            except Exception as fwd_err:
+                # forward ล้มเหลว (เช่น noforwards หรือ permission) → fallback upload
+                log.warning(f"[single] forward failed ({fwd_err}) — falling back to upload")
+                await _do_upload(dest_entity, batch, thread_id, chat_entity, msg_id)
+                actual_mode = "📥 upload (forward fallback)"
+        else:
+            await _do_upload(dest_entity, batch, thread_id, chat_entity, msg_id)
 
-        mode = "⚡ forward" if use_forward else "📥 upload"
         await status_cb(
             f"✅ ส่งสำเร็จ!\n"
             f"• Chat: **{chat_title}**\n"
             f"• Message ID: `{msg_id}`\n"
             f"• ไฟล์: {len(batch)}\n"
-            f"• Mode: {mode}\n"
+            f"• Mode: {actual_mode}\n"
             f"• Topic: **{topic_name}**"
         )
 
