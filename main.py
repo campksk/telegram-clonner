@@ -298,8 +298,7 @@ async def clone_group(source: str | int, status_cb) -> None:
                     from_peer=source_entity,
                     # reply_to ใน forward_messages ต้องใช้ SendMessageRequest
                     # workaround: pin thread ด้วย reply ทีหลังไม่ได้
-                    # → ใช้ message thread_id ผ่าน top_msg_id
-                    top_msg_id=thread_id,
+                    reply_to=thread_id,
                 )
                 async with lock:
                     counters["success"] += len(batch)
@@ -555,7 +554,7 @@ async def clone_single_message(
                     entity=dest_entity,
                     messages=[m.id for m in batch],
                     from_peer=chat_entity,
-                    top_msg_id=thread_id,
+                    reply_to=thread_id,
                 )
                 actual_mode = "⚡ forward"
             except Exception as fwd_err:
