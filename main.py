@@ -627,7 +627,7 @@ async def handle_clone(event: events.NewMessage.Event):
     # ── ตรวจว่าเป็นลิงก์ t.me หรือเปล่า ──────────────────────────────────────
     link_parsed = parse_tg_link(arg)
     if link_parsed:
-        chat_ref, msg_id, _ = link_parsed
+        chat_ref, msg_id = link_parsed
         # single message clone — ไม่ใส่ active_tasks/pending (เร็วมาก)
         asyncio.create_task(
             clone_single_message(chat_ref, msg_id, None, status_cb)
