@@ -24,6 +24,8 @@ from telethon.tl.functions.channels import (
     GetForumTopicsRequest,
 )
 from telethon.errors import FloodWaitError, ChatAdminRequiredError
+from telethon.tl.functions.messages import ForwardMessagesRequest
+from telethon.tl.types import InputPeerChannel
 
 load_dotenv()
 
@@ -177,6 +179,23 @@ def is_public_entity(entity) -> bool:
     return not bool(getattr(entity, "noforwards", False))
 
 
+async def _forward_to_topic(from_peer, dest, msg_ids: list[int], thread_id: int) -> None:
+    """
+    Forward messages เข้า topic (forum thread) ด้วย ForwardMessagesRequest โดยตรง
+    Telethon's forward_messages() wrapper ไม่รองรับ top_msg_id จึงต้องใช้ raw request
+    """
+    from telethon.tl.functions.messages import ForwardMessagesRequest
+    await user_client(ForwardMessagesRequest(
+        from_peer=from_peer,
+        id=msg_ids,
+        to_peer=dest,
+        top_msg_id=thread_id,
+        random_id=[__import__('random').randint(0, 2**63) for _ in msg_ids],
+        silent=False,
+        drop_author=False,
+    ))
+
+
 # ─── Clone worker ──────────────────────────────────────────────────────────────
 async def clone_group(source: str | int, status_cb) -> None:
     """
@@ -292,14 +311,7 @@ async def clone_group(source: str | int, status_cb) -> None:
         async with sem:
             try:
                 msg_ids = [m.id for m in batch]
-                await user_client.forward_messages(
-                    entity=dest_entity,
-                    messages=msg_ids,
-                    from_peer=source_entity,
-                    # reply_to ใน forward_messages ต้องใช้ SendMessageRequest
-                    # workaround: pin thread ด้วย reply ทีหลังไม่ได้
-                    reply_to=thread_id,
-                )
+                await _forward_to_topic(source_entity, dest_entity, msg_ids, thread_id)
                 async with lock:
                     counters["success"] += len(batch)
                     already_sent.update(m.id for m in batch)
@@ -550,12 +562,7 @@ async def clone_single_message(
         actual_mode = "📥 upload"
         if use_forward:
             try:
-                await user_client.forward_messages(
-                    entity=dest_entity,
-                    messages=[m.id for m in batch],
-                    from_peer=chat_entity,
-                    reply_to=thread_id,
-                )
+                await _forward_to_topic(chat_entity, dest_entity, [m.id for m in batch], thread_id)
                 actual_mode = "⚡ forward"
             except Exception as fwd_err:
                 # forward ล้มเหลว (เช่น noforwards หรือ permission) → fallback upload
