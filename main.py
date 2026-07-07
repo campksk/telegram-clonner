@@ -111,11 +111,10 @@ for _tl in (
 ):
     logging.getLogger(_tl).setLevel(logging.WARNING)
 
-# ─── Clients ───────────────────────────────────────────────────────────────────
-# bot_client  → รับคำสั่งจาก user
-# user_client → เข้าถึง group ส่วนตัว / download / upload
-bot_client  = TelegramClient(str(SESSION_DIR / "bot"),  API_ID, API_HASH)
-user_client = TelegramClient(str(SESSION_DIR / "user"), API_ID, API_HASH)
+# ─── Clients (สร้างใน main() เพื่อรองรับ Python 3.10+ ที่ไม่ auto-create event loop) ─
+# bot_client และ user_client จะถูกประกาศใน main() แล้ว inject เป็น global
+bot_client  = None
+user_client = None
 
 # ─── Media type filter ─────────────────────────────────────────────────────────
 # MIME ที่ถือเป็นสติกเกอร์ → ข้ามเสมอ
@@ -589,7 +588,14 @@ async def clone_single_message(
 
 
 # ─── Bot command handlers ──────────────────────────────────────────────────────
-@bot_client.on(events.NewMessage(pattern=r"^/clone(?:\s+(.*))?$"))
+# handlers ประกาศเป็น plain async def แล้ว register ใน _register_handlers()
+# เพื่อให้ bot_client ถูกสร้างใน main() ก่อน (รองรับ Python 3.10+)
+
+def _register_handlers():
+    bot_client.add_event_handler(handle_clone,  events.NewMessage(pattern=r"^/clone(?:\s+(.*))?$"))
+    bot_client.add_event_handler(handle_cancel, events.NewMessage(pattern=r"^/cancel(?:\s+(.*))?$"))
+    bot_client.add_event_handler(handle_jobs,   events.NewMessage(pattern=r"^/jobs$"))
+    bot_client.add_event_handler(handle_ping,   events.NewMessage(pattern=r"^/ping$"))
 async def handle_clone(event: events.NewMessage.Event):
     """
     รับคำสั่ง clone ทั้งหมด แล้วแยก branch เองในตัว
@@ -667,7 +673,6 @@ async def handle_clone(event: events.NewMessage.Event):
     active_tasks[task_key] = task
 
 
-@bot_client.on(events.NewMessage(pattern=r"^/cancel(?:\s+(.*))?$"))
 async def handle_cancel(event: events.NewMessage.Event):
     """ยกเลิก clone job ที่กำลังทำงานอยู่"""
     if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS:
@@ -701,7 +706,6 @@ async def handle_cancel(event: events.NewMessage.Event):
         await event.reply(f"🛑 ส่งสัญญาณยกเลิกทั้งหมด {count} job แล้ว")
 
 
-@bot_client.on(events.NewMessage(pattern=r"^/jobs$"))
 async def handle_jobs(event: events.NewMessage.Event):
     """แสดง job ที่กำลังทำงานอยู่"""
     if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS:
@@ -721,7 +725,6 @@ async def handle_jobs(event: events.NewMessage.Event):
     )
 
 
-@bot_client.on(events.NewMessage(pattern=r"^/ping$"))
 async def handle_ping(event: events.NewMessage.Event):
     """ตรวจสอบสถานะ server"""
     if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS:
@@ -752,6 +755,13 @@ async def handle_ping(event: events.NewMessage.Event):
 
 # ─── Entry point ───────────────────────────────────────────────────────────────
 async def main():
+    global bot_client, user_client
+    bot_client  = TelegramClient(str(SESSION_DIR / "bot"),  API_ID, API_HASH)
+    user_client = TelegramClient(str(SESSION_DIR / "user"), API_ID, API_HASH)
+
+    # Register handlers (ต้องทำหลังสร้าง bot_client)
+    _register_handlers()
+
     log.info("กำลังเชื่อมต่อ User client...")
     await user_client.start()
     log.info("User client พร้อม")
