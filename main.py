@@ -19,11 +19,35 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
-from telethon.tl.functions.channels import (
-    CreateForumTopicRequest,
-    GetForumTopicsRequest,
-)
-from telethon.errors import FloodWaitError, FloodPremiumWaitError, ChatAdminRequiredError
+try:
+    # Telethon < 1.42.0
+    from telethon.tl.functions.channels import (
+        CreateForumTopicRequest,
+        GetForumTopicsRequest,
+    )
+except ImportError:
+    # Telethon >= 1.42.0 ย้าย request เหล่านี้ไปอยู่ใต้ messages แทน
+    from telethon.tl.functions.messages import (
+        CreateForumTopicRequest,
+        GetForumTopicsRequest,
+    )
+from telethon.errors import FloodWaitError, ChatAdminRequiredError
+from telethon.errors.rpcbaseerrors import FloodError
+try:
+    # Telethon >= 1.37.0 เท่านั้นที่มีคลาสนี้ (แยก error FLOOD_PREMIUM_WAIT_X ออกจาก FloodWaitError)
+    from telethon.errors import FloodPremiumWaitError
+except ImportError:
+    FloodPremiumWaitError = FloodError  # เวอร์ชันเก่า: telethon จะโยนเป็น FloodError (base) แทน
+
+import re
+
+
+def _flood_seconds(e: Exception, default: int = 5) -> int:
+    """ดึงจำนวนวินาทีจาก flood error แบบไม่พึ่ง .seconds (เผื่อ telethon เก่า/ไม่รู้จัก error code นี้)"""
+    if hasattr(e, "seconds"):
+        return e.seconds
+    m = re.search(r"(\d+)\s*seconds?", str(e))
+    return int(m.group(1)) if m else default
 from telethon.tl.functions.messages import ForwardMessagesRequest
 from telethon.tl.types import InputPeerChannel
 
@@ -319,8 +343,9 @@ async def clone_group(source: str | int, status_cb) -> None:
                 log.info(f"[fwd batch {b_idx}] {len(batch)} ไฟล์ ✓")
 
             except (FloodWaitError, FloodPremiumWaitError) as e:
-                log.warning(f"[fwd batch {b_idx}] FloodWait {e.seconds}s")
-                await asyncio.sleep(e.seconds + 2)
+                wait_s = _flood_seconds(e)
+                log.warning(f"[fwd batch {b_idx}] FloodWait {wait_s}s")
+                await asyncio.sleep(wait_s + 2)
                 async with lock:
                     counters["failed"] += len(batch)
 
@@ -376,8 +401,9 @@ async def clone_group(source: str | int, status_cb) -> None:
                     save_sent_db(sent_db)
 
             except (FloodWaitError, FloodPremiumWaitError) as e:
-                log.warning(f"[up batch {b_idx}] FloodWait {e.seconds}s — รอ...")
-                await asyncio.sleep(e.seconds + 2)
+                wait_s = _flood_seconds(e)
+                log.warning(f"[up batch {b_idx}] FloodWait {wait_s}s — รอ...")
+                await asyncio.sleep(wait_s + 2)
                 async with lock:
                     counters["failed"] += len(batch)
 
@@ -581,8 +607,9 @@ async def clone_single_message(
         )
 
     except (FloodWaitError, FloodPremiumWaitError) as e:
-        await asyncio.sleep(e.seconds + 2)
-        await status_cb(f"❌ FloodWait {e.seconds}s — ลองใหม่อีกครั้ง")
+        wait_s = _flood_seconds(e)
+        await asyncio.sleep(wait_s + 2)
+        await status_cb(f"❌ FloodWait {wait_s}s — ลองใหม่อีกครั้ง")
     except Exception as e:
         await status_cb(f"❌ ส่งล้มเหลว: `{e}`")
 

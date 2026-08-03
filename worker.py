@@ -11,8 +11,27 @@ import logging
 import shutil
 from pathlib import Path
 
-from telethon.errors import FloodWaitError, FloodPremiumWaitError, ChatAdminRequiredError
-from telethon.tl.functions.channels import CreateForumTopicRequest, GetForumTopicsRequest
+from telethon.errors import FloodWaitError, ChatAdminRequiredError
+from telethon.errors.rpcbaseerrors import FloodError
+try:
+    from telethon.errors import FloodPremiumWaitError
+except ImportError:
+    FloodPremiumWaitError = FloodError
+
+import re
+
+
+def _flood_seconds(e: Exception, default: int = 5) -> int:
+    if hasattr(e, "seconds"):
+        return e.seconds
+    m = re.search(r"(\d+)\s*seconds?", str(e))
+    return int(m.group(1)) if m else default
+
+
+try:
+    from telethon.tl.functions.channels import CreateForumTopicRequest, GetForumTopicsRequest
+except ImportError:
+    from telethon.tl.functions.messages import CreateForumTopicRequest, GetForumTopicsRequest
 from telethon.tl.types import User as TLUser
 
 import database
@@ -208,8 +227,9 @@ async def clone_group(source: str | int, status_cb) -> None:
             database.mark_sent(src_id, {m.id for m in batch})
 
         except (FloodWaitError, FloodPremiumWaitError) as e:
-            log.warning(f"FloodWait {e.seconds}s — รอ...")
-            await asyncio.sleep(e.seconds + 2)
+            wait_s = _flood_seconds(e)
+            log.warning(f"FloodWait {wait_s}s — รอ...")
+            await asyncio.sleep(wait_s + 2)
             failed += len(batch)
 
         except asyncio.CancelledError:
