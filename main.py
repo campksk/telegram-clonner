@@ -23,7 +23,7 @@ from telethon.tl.functions.channels import (
     CreateForumTopicRequest,
     GetForumTopicsRequest,
 )
-from telethon.errors import FloodWaitError, ChatAdminRequiredError
+from telethon.errors import FloodWaitError, FloodPremiumWaitError, ChatAdminRequiredError
 from telethon.tl.functions.messages import ForwardMessagesRequest
 from telethon.tl.types import InputPeerChannel
 
@@ -318,7 +318,7 @@ async def clone_group(source: str | int, status_cb) -> None:
                     save_sent_db(sent_db)
                 log.info(f"[fwd batch {b_idx}] {len(batch)} ไฟล์ ✓")
 
-            except FloodWaitError as e:
+            except (FloodWaitError, FloodPremiumWaitError) as e:
                 log.warning(f"[fwd batch {b_idx}] FloodWait {e.seconds}s")
                 await asyncio.sleep(e.seconds + 2)
                 async with lock:
@@ -375,7 +375,7 @@ async def clone_group(source: str | int, status_cb) -> None:
                     sent_db[src_key] = already_sent
                     save_sent_db(sent_db)
 
-            except FloodWaitError as e:
+            except (FloodWaitError, FloodPremiumWaitError) as e:
                 log.warning(f"[up batch {b_idx}] FloodWait {e.seconds}s — รอ...")
                 await asyncio.sleep(e.seconds + 2)
                 async with lock:
@@ -580,7 +580,7 @@ async def clone_single_message(
             f"• Topic: **{topic_name}**"
         )
 
-    except FloodWaitError as e:
+    except (FloodWaitError, FloodPremiumWaitError) as e:
         await asyncio.sleep(e.seconds + 2)
         await status_cb(f"❌ FloodWait {e.seconds}s — ลองใหม่อีกครั้ง")
     except Exception as e:

@@ -11,7 +11,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from telethon.errors import FloodWaitError, ChatAdminRequiredError
+from telethon.errors import FloodWaitError, FloodPremiumWaitError, ChatAdminRequiredError
 from telethon.tl.functions.channels import CreateForumTopicRequest, GetForumTopicsRequest
 from telethon.tl.types import User as TLUser
 
@@ -207,7 +207,7 @@ async def clone_group(source: str | int, status_cb) -> None:
             sent_files += len(batch)
             database.mark_sent(src_id, {m.id for m in batch})
 
-        except FloodWaitError as e:
+        except (FloodWaitError, FloodPremiumWaitError) as e:
             log.warning(f"FloodWait {e.seconds}s — รอ...")
             await asyncio.sleep(e.seconds + 2)
             failed += len(batch)
