@@ -12,6 +12,7 @@ Flow:
 import asyncio
 import json
 import logging
+import sys
 import os
 import shutil
 import time
@@ -119,6 +120,7 @@ active_tasks: dict[str, asyncio.Task] = {}
 
 # ─── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
+    stream=sys.stdout,
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
