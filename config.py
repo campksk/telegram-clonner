@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -23,6 +24,7 @@ PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "3"))
 ALLOWED_USERS = set(int(x.strip()) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip())
 
 logging.basicConfig(
+    stream=sys.stdout,
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
