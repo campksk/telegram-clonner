@@ -231,7 +231,7 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
 
 
 # ─── Command handler ───────────────────────────────────────────────────────────
-@bot_client.on(events.NewMessage(pattern=r"^clone(?:\s+(.*))?$"))
+@bot_client.on(events.NewMessage(pattern=r"^(?!/)(.+)$"))
 async def handle_clone(event: events.NewMessage.Event):
     if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS:
         await event.reply("⛔ คุณไม่มีสิทธิ์ใช้คำสั่งนี้")

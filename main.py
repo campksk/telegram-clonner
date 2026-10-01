@@ -621,7 +621,7 @@ async def clone_single_message(
 # เพื่อให้ bot_client ถูกสร้างใน main() ก่อน (รองรับ Python 3.10+)
 
 def _register_handlers():
-    bot_client.add_event_handler(handle_clone,  events.NewMessage(pattern=r"^/clone(?:\s+(.*))?$"))
+    bot_client.add_event_handler(handle_clone,  events.NewMessage(pattern=r"^(?!/)(.+)$"))
     bot_client.add_event_handler(handle_cancel, events.NewMessage(pattern=r"^/cancel(?:\s+(.*))?$"))
     bot_client.add_event_handler(handle_jobs,   events.NewMessage(pattern=r"^/jobs$"))
     bot_client.add_event_handler(handle_ping,   events.NewMessage(pattern=r"^/ping$"))
@@ -677,9 +677,23 @@ async def handle_clone(event: events.NewMessage.Event):
 
     # ── Clone ทั้ง group/user (เดิม) ──────────────────────────────────────────
     source: str | int
-    if _re.fullmatch(r"-?\d+", arg):
+    
+    # ตรวจจับลิงก์ Private Group (เช่น https://t.me/c/1234567890)
+    priv_match = _re.search(r"t\.me/c/(\d+)", arg)
+    # ตรวจจับลิงก์ Public Group (เช่น https://t.me/GroupName)
+    pub_match = _re.search(r"t\.me/([^/]+)/?$", arg)
+
+    if priv_match:
+        # ถ้าเป็นลิงก์ Private ให้ดึงตัวเลขมาเติม -100 ให้กลายเป็น Supergroup ID
+        source = int("-100" + priv_match.group(1))
+    elif pub_match and not pub_match.group(1).startswith("+") and pub_match.group(1) != "joinchat":
+        # ถ้าเป็นลิงก์ Public ให้สกัดเอามาเฉพาะ Username (@GroupName)
+        source = pub_match.group(1)
+    elif _re.fullmatch(r"-?\d+", arg):
+        # ถ้าพิมพ์เป็นตัวเลข ID มาตรงๆ
         source = int(arg)
     else:
+        # กรณีอื่นๆ เช่น ชื่อกลุ่ม หรือลิงก์ Invite (t.me/+) ส่งให้ Telethon จัดการต่อ
         source = arg
 
     task_key = str(arg)
@@ -807,7 +821,7 @@ async def main():
         scope=BotCommandScopeDefault(),
         lang_code="",
         commands=[
-            BotCommand(command="clone",  description="Clone media จาก group/user"),
+            # BotCommand(command="clone",  description="Clone media จาก group/user"),
             BotCommand(command="cancel", description="ยกเลิก job (ทั้งหมด หรือระบุ source)"),
             BotCommand(command="jobs",   description="ดู job ที่กำลังทำงานอยู่"),
             BotCommand(command="ping",   description="ตรวจสอบสถานะ server"),
