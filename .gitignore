@@ -5,4 +5,4 @@ __pycache__/
 sent_media.json
 pending_jobs.json
 logs/
-x_cookies.txt
+*_cookies.txt

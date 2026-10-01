@@ -54,6 +54,26 @@ async def handle_message(event: events.NewMessage.Event):
         return
     # (สิ้นสุดส่วนที่เพิ่ม)
 
+    # 🌟 เพิ่มส่วนดักจับ Instagram (รองรับทั้ง Post, Reel, TV และ Story)
+    ig_match = re.search(r"https?://(?:www\.)?instagram\.com/(?:p|reel|tv|stories)/([^/?#&]+)", arg)
+    if ig_match:
+        task_key = f"ig_{ig_match.group(1)}"
+        if task_key in active_tasks and not active_tasks[task_key].done():
+            await event.reply(f"⚠️ กำลังโหลดลิงก์ Instagram นี้อยู่...")
+            return
+
+        async def _run_ig():
+            try:
+                await worker.clone_ig_media(arg, status_cb)
+            except asyncio.CancelledError:
+                await status_cb(f"🛑 ยกเลิกโหลด Instagram แล้ว")
+            finally:
+                active_tasks.pop(task_key, None)
+
+        active_tasks[task_key] = asyncio.create_task(_run_ig())
+        return
+    # (สิ้นสุดส่วน Instagram)
+
     # (โค้ดด้านล่างเป็นส่วนของ Public/Private Group แบบเดิม ปล่อยไว้เหมือนเดิม)
     source = None
     priv_match = re.search(r"t\.me/c/(\d+)", arg)
