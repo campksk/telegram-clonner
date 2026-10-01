@@ -34,6 +34,30 @@ async def handle_message(event: events.NewMessage.Event):
         asyncio.create_task(worker.clone_single_message(chat_ref, msg_id, status_cb))
         return
 
+    # 🌟 เพิ่มส่วนนี้เข้าไป: ตรวจสอบว่าเป็นลิงก์ X / Twitter หรือไม่
+    x_match = re.search(r"https?://(?:www\.)?(?:twitter\.com|x\.com)/([^/]+)/status/(\d+)", arg)
+    if x_match:
+        task_key = f"x_{x_match.group(2)}"
+        if task_key in active_tasks and not active_tasks[task_key].done():
+            await event.reply(f"⚠️ กำลังโหลดลิงก์ X นี้อยู่...")
+            return
+
+        async def _run_x():
+            try:
+                await worker.clone_x_media(arg, status_cb)
+            except asyncio.CancelledError:
+                await status_cb(f"🛑 ยกเลิกโหลด X แล้ว")
+            finally:
+                active_tasks.pop(task_key, None)
+
+        active_tasks[task_key] = asyncio.create_task(_run_x())
+        return
+    # (สิ้นสุดส่วนที่เพิ่ม)
+
+    # (โค้ดด้านล่างเป็นส่วนของ Public/Private Group แบบเดิม ปล่อยไว้เหมือนเดิม)
+    source = None
+    priv_match = re.search(r"t\.me/c/(\d+)", arg)
+
     source = None
     priv_match = re.search(r"t\.me/c/(\d+)", arg)
     pub_match = re.search(r"t\.me/([^/]+)/?$", arg)

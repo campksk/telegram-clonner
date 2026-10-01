@@ -2,6 +2,7 @@ import asyncio
 import logging
 import shutil
 import re
+import os
 from pathlib import Path
 from typing import Callable, Awaitable
 
@@ -294,3 +295,75 @@ async def clone_single_message(chat: str | int, msg_id: int, status_cb: StatusCb
             shutil.rmtree(job_dir, ignore_errors=True)
 
     await status_cb(f"✅ ส่งสำเร็จ!\n• Chat: **{chat_title}**\n• ไฟล์: {len(batch)}\n• Mode: {actual_mode}")
+
+async def clone_x_media(url: str, status_cb: StatusCb) -> None:
+    await status_cb(f"🔍 พบลิงก์ X\n📥 กำลังดาวน์โหลด...")
+    
+    # แยก ID โพสต์เพื่อสร้างโฟลเดอร์ชั่วคราว
+    job_id = url.split('/')[-1].split('?')[0]
+    job_dir = DOWNLOAD_DIR / f"x_{job_id}"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 🌟 เช็คไฟล์ cookies (สำหรับแอคเคาท์ Private)
+    cookies_arg = []
+    if Path("x_cookies.txt").exists():
+        cookies_arg = ["--cookies", "x_cookies.txt"]
+        
+    cmd = [
+        "gallery-dl",
+        *cookies_arg,
+        "-d", str(job_dir),
+        url
+    ]
+    
+    # สั่งรันคำสั่งโหลดเบื้องหลัง
+    process = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await process.communicate()
+    
+    if process.returncode != 0:
+        err = stderr.decode('utf-8').strip() or stdout.decode('utf-8').strip()
+        await status_cb(f"❌ ดาวน์โหลด X ล้มเหลว:\n`{err}`\n\n💡 หมายเหตุ: หากบัญชีตั้ง Private คุณต้องใส่ไฟล์ `x_cookies.txt` ไว้ที่โฟลเดอร์หลักของบอท")
+        shutil.rmtree(job_dir, ignore_errors=True)
+        return
+
+    # รวบรวมไฟล์ที่โหลดมาได้
+    paths = []
+    for root, _, files in os.walk(job_dir):
+        for file in files:
+            paths.append(os.path.join(root, file))
+            
+    if not paths:
+        await status_cb(f"⚠️ ไม่พบรูปภาพ/วิดีโอในโพสต์นี้ หรือบอทไม่มีสิทธิ์เข้าถึง (ต้องใช้ Cookies)")
+        shutil.rmtree(job_dir, ignore_errors=True)
+        return
+        
+    await status_cb(f"✅ โหลดสำเร็จ {len(paths)} ไฟล์\n📤 กำลังอัปโหลดลงกลุ่ม...")
+    
+    # 🌟 ระบุ Topic ปลายทาง (บอทจะสร้าง Topic ชื่อนี้ในกลุ่มให้อัตโนมัติ)
+    topic_name = "X Downloads"
+    try:
+        thread_id = await get_or_create_topic(topic_name)
+    except Exception as e:
+        await status_cb(f"❌ สร้าง/หา topic ล้มเหลว: `{e}`")
+        return
+        
+    dest_entity = await user_client.get_entity(DEST_GROUP_ID)
+    
+    try:
+        # Telegram ส่งไฟล์ได้ทีละ 10 ไฟล์ต่อ 1 ชุด (Album)
+        for i in range(0, len(paths), 10):
+            batch_paths = paths[i:i+10]
+            if len(batch_paths) == 1:
+                await user_client.send_file(dest_entity, file=batch_paths[0], reply_to=thread_id)
+            else:
+                await user_client.send_file(dest_entity, file=batch_paths, reply_to=thread_id)
+                
+        await status_cb(f"✅ ส่งไฟล์จาก X สำเร็จ!\n• Topic: **{topic_name}**\n• จำนวน: {len(paths)} ไฟล์")
+    except Exception as e:
+        log.error(f"X upload error: {e}")
+        await status_cb(f"❌ อัปโหลดไฟล์จาก X ล้มเหลว: `{e}`")
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
+
