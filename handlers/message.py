@@ -17,6 +17,10 @@ def parse_tg_link(url: str):
 
 @bot_client.on(events.NewMessage(pattern=r"^(?!/)(.+)$"))
 async def handle_message(event: events.NewMessage.Event):
+    # 🌟 เพิ่ม 2 บรรทัดนี้: ถ้าข้อความไม่ได้มาจากแชทส่วนตัว ให้หยุดการทำงานทันที
+    if not event.is_private:
+        return
+
     if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS:
         return
 
