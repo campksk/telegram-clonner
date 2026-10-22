@@ -78,6 +78,24 @@ async def handle_message(event: events.NewMessage.Event):
         return
     # (สิ้นสุดส่วน Instagram)
 
+    # 🌟 เพิ่มส่วนดักจับ TikTok (รองรับทั้งเว็บปกติและลิงก์แชร์แบบสั้น)
+    tiktok_match = re.search(r"https?://(?:www\.|vm\.|vt\.)?tiktok\.com/\S+", arg)
+    if tiktok_match:
+        import time
+        task_key = f"tiktok_{int(time.time())}"
+        
+        async def _run_tiktok():
+            try:
+                await worker.clone_tiktok_media(arg, status_cb)
+            except asyncio.CancelledError:
+                await status_cb(f"🛑 ยกเลิกโหลด TikTok แล้ว")
+            finally:
+                active_tasks.pop(task_key, None)
+
+        active_tasks[task_key] = asyncio.create_task(_run_tiktok())
+        return
+    # (สิ้นสุดส่วน TikTok)
+
     # (โค้ดด้านล่างเป็นส่วนของ Public/Private Group แบบเดิม ปล่อยไว้เหมือนเดิม)
     source = None
     priv_match = re.search(r"t\.me/c/(\d+)", arg)

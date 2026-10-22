@@ -439,3 +439,73 @@ async def clone_ig_media(url: str, status_cb: StatusCb) -> None:
         await status_cb(f"❌ อัปโหลดไฟล์จาก Instagram ล้มเหลว: `{e}`")
     finally:
         shutil.rmtree(job_dir, ignore_errors=True)
+
+async def clone_tiktok_media(url: str, status_cb: StatusCb) -> None:
+    await status_cb(f"🔍 พบลิงก์ TikTok\n📥 กำลังดาวน์โหลด...")
+    
+    import time
+    # ใช้เวลาปัจจุบันเป็น ID โฟลเดอร์ (เพราะลิงก์สั้นของ TikTok ดึง ID จาก URL ยาก)
+    job_id = str(int(time.time()))
+    job_dir = DOWNLOAD_DIR / f"tiktok_{job_id}"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 🌟 เช็คไฟล์ cookies (เผื่อไว้ในกรณีที่ TikTok บล็อกการเข้าถึง)
+    cookies_arg = []
+    if Path("tiktok_cookies.txt").exists():
+        cookies_arg = ["--cookies", "tiktok_cookies.txt"]
+        
+    cmd = [
+        "gallery-dl",
+        *cookies_arg,
+        "-d", str(job_dir),
+        url
+    ]
+    
+    process = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await process.communicate()
+    
+    if process.returncode != 0:
+        err = stderr.decode('utf-8').strip() or stdout.decode('utf-8').strip()
+        await status_cb(f"❌ ดาวน์โหลด TikTok ล้มเหลว:\n`{err}`\n\n💡 หากโดนบล็อก ให้ใส่ไฟล์ `tiktok_cookies.txt` ไว้ในโฟลเดอร์บอท")
+        shutil.rmtree(job_dir, ignore_errors=True)
+        return
+
+    # รวบรวมไฟล์ที่โหลดมาได้
+    paths = []
+    for root, _, files in os.walk(job_dir):
+        for file in files:
+            paths.append(os.path.join(root, file))
+            
+    if not paths:
+        await status_cb(f"⚠️ ไม่พบวิดีโอ (โพสต์อาจถูกลบ หรือตั้งเป็นส่วนตัว)")
+        shutil.rmtree(job_dir, ignore_errors=True)
+        return
+        
+    await status_cb(f"✅ โหลดสำเร็จ {len(paths)} ไฟล์\n📤 กำลังอัปโหลดลงกลุ่ม...")
+    
+    topic_name = "TikTok Downloads"
+    try:
+        thread_id = await get_or_create_topic(topic_name)
+    except Exception as e:
+        await status_cb(f"❌ สร้าง/หา topic ล้มเหลว: `{e}`")
+        return
+        
+    dest_entity = await user_client.get_entity(DEST_GROUP_ID)
+    
+    try:
+        # อัปโหลดไฟล์กลับเข้ากลุ่ม
+        for i in range(0, len(paths), 10):
+            batch_paths = paths[i:i+10]
+            if len(batch_paths) == 1:
+                await user_client.send_file(dest_entity, file=batch_paths[0], reply_to=thread_id)
+            else:
+                await user_client.send_file(dest_entity, file=batch_paths, reply_to=thread_id)
+                
+        await status_cb(f"✅ ส่งไฟล์จาก TikTok สำเร็จ!\n• Topic: **{topic_name}**\n• จำนวน: {len(paths)} ไฟล์")
+    except Exception as e:
+        log.error(f"TikTok upload error: {e}")
+        await status_cb(f"❌ อัปโหลดไฟล์จาก TikTok ล้มเหลว: `{e}`")
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
