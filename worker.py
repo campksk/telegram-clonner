@@ -402,25 +402,46 @@ def _collect_files(job_dir: Path) -> list[str]:
     return paths
 
 
-async def _upload_to_group(paths: list[str], thread_id: int, site_name: str, status_cb: StatusCb, cleanup_dir: Path | None = None) -> None:
+def _collect_files_grouped(job_dir: Path) -> list[list[str]]:
+    """Collect media files grouped by parent directory (per-post grouping).
+    
+    gallery-dl creates a subdirectory per post, so files in the same
+    subdirectory belong to the same post. Returns a list of groups,
+    where each group is a list of file paths for one post.
+    """
+    media_exts = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.mp4', '.mkv', '.mov', '.webm', '.mp3', '.m4a', '.ogg', '.avif', '.heic'}
+    groups: dict[str, list[str]] = {}
+    for root, _, files in os.walk(job_dir):
+        for file in sorted(files):  # sort to preserve 001, 002, ... order
+            p = os.path.join(root, file)
+            ext = os.path.splitext(file)[1].lower()
+            if ext in media_exts and os.path.getsize(p) > 1024:
+                groups.setdefault(root, []).append(p)
+    return list(groups.values())
+
+
+async def _upload_to_group(paths: list[list[str]], thread_id: int, site_name: str, status_cb: StatusCb, cleanup_dir: Path | None = None) -> None:
     """Upload downloaded files to Telegram group, with per-file error handling."""
+    total_files = sum(len(g) for g in paths)
     dest_entity = await user_client.get_entity(DEST_GROUP_ID)
     try:
-        # Try batch first, fallback to individual on failure
-        for i in range(0, len(paths), 10):
-            batch_paths = paths[i:i+10]
-            try:
-                if len(batch_paths) == 1:
-                    await user_client.send_file(dest_entity, file=batch_paths[0], reply_to=thread_id)
-                else:
-                    await user_client.send_file(dest_entity, file=batch_paths, reply_to=thread_id)
-            except Exception:
-                # Fallback: send one by one
-                for p in batch_paths:
-                    try:
-                        await user_client.send_file(dest_entity, file=p, reply_to=thread_id)
-                    except Exception as e:
-                        log.warning(f"{site_name}: skip file {p}: {e}")
+        for group in paths:
+            # Send each group (post) as a separate album
+            for i in range(0, len(group), 10):
+                batch = group[i:i+10]
+                try:
+                    if len(batch) == 1:
+                        await user_client.send_file(dest_entity, file=batch[0], reply_to=thread_id)
+                    else:
+                        await user_client.send_file(dest_entity, file=batch, reply_to=thread_id)
+                except Exception:
+                    # Fallback: send one by one
+                    for p in batch:
+                        try:
+                            await user_client.send_file(dest_entity, file=p, reply_to=thread_id)
+                        except Exception as e:
+                            log.warning(f"{site_name}: skip file {p}: {e}")
+            await asyncio.sleep(0.5)  # small delay between posts
         await status_cb(f"✅ ส่งไฟลจาก {site_name} สำเรจ!\n• Topic: **{site_name} Downloads**\n• จำนวน: {len(paths)} ไฟล")
     except Exception as e:
         log.error(f"{site_name} upload error: {e}")
@@ -446,7 +467,7 @@ async def clone_x_media(url: str, status_cb: StatusCb) -> None:
         shutil.rmtree(job_dir, ignore_errors=True)
         return
 
-    paths = _collect_files(job_dir)
+    paths = _collect_files_grouped(job_dir)
     
     if not paths:
         await status_cb(f"⚠️ ไมพบรป/วดโอสานี หรอบทไมมสิทธเข้ถึง (ตองใช Cookies)")
@@ -481,7 +502,7 @@ async def clone_ig_media(url: str, status_cb: StatusCb) -> None:
         shutil.rmtree(job_dir, ignore_errors=True)
         return
 
-    paths = _collect_files(job_dir)
+    paths = _collect_files_grouped(job_dir)
     
     if not paths:
         await status_cb(f"⚠️ ไมพบรป/วดโ (อาจเปนปสตทถกกลบไปแลว)")
@@ -513,7 +534,7 @@ async def clone_tiktok_media(url: str, status_cb: StatusCb) -> None:
         shutil.rmtree(job_dir, ignore_errors=True)
         return
 
-    paths = _collect_files(job_dir)
+    paths = _collect_files_grouped(job_dir)
     
     if not paths:
         await status_cb(f"⚠️ ไมพบวดโ (ปสตอาจถกกลบ หร ตั้งเปนสวนตัว)")
