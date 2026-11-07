@@ -1,8 +1,11 @@
 import asyncio
+import hashlib
 import logging
 import shutil
 import re
 import os
+import sys
+import time
 from pathlib import Path
 from typing import Callable, Awaitable
 
@@ -12,18 +15,69 @@ try:
     from telethon.errors import FloodPremiumWaitError
 except ImportError:
     FloodPremiumWaitError = FloodError
-try:
-    from telethon.tl.functions.channels import CreateForumTopicRequest, GetForumTopicsRequest
-except ImportError:
-    from telethon.tl.functions.messages import CreateForumTopicRequest, GetForumTopicsRequest
+from telethon.tl.functions.messages import CreateForumTopicRequest, GetForumTopicsRequest
 from telethon.tl.functions.messages import ForwardMessagesRequest
 from telethon.tl.types import User as TLUser
 
 import db
-from config import DEST_GROUP_ID, DOWNLOAD_DIR, SEND_DELAY, PARALLEL_WORKERS, user_client
+from config import DEST_GROUP_ID, DOWNLOAD_DIR, SEND_DELAY, PARALLEL_WORKERS, MAX_SCAN_MESSAGES, user_client
 
 log = logging.getLogger("clone-bot.worker")
 StatusCb = Callable[[str], Awaitable[None]]
+
+GALLERY_DL_TIMEOUT = 300  # seconds
+
+
+def _gallery_dl_cmd() -> list[str]:
+    """Return the full path to gallery-dl binary."""
+    venv_bin = Path(sys.executable).parent / "gallery-dl"
+    if venv_bin.exists():
+        return [str(venv_bin)]
+    gd = shutil.which("gallery-dl")
+    if gd:
+        return [gd]
+    raise RuntimeError("gallery-dl not found. Install with: pip install gallery-dl")
+
+
+COOKIE_FILES = {
+    "x": Path("cookies_x.txt"),
+    "ig": Path("cookies_ig.txt"),
+    "tiktok": Path("cookies_tiktok.txt"),
+}
+
+
+def _cookie_args(site: str) -> list[str]:
+    """Return --cookies arg if cookie file exists, else []."""
+    cf = COOKIE_FILES.get(site)
+    if cf and cf.exists():
+        return ["--cookies", str(cf)]
+    return []
+
+
+async def _run_gallery_dl(url: str, job_dir: Path, cookies: list[str]) -> tuple[bool, str]:
+    """Run gallery-dl subprocess with timeout. Returns (success, error_msg)."""
+    try:
+        cmd = _gallery_dl_cmd() + ["-d", str(job_dir)] + cookies + [url]
+    except RuntimeError as e:
+        return False, str(e)
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=GALLERY_DL_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.communicate()
+        return False, f"gallery-dl timeout ({GALLERY_DL_TIMEOUT}s)"
+
+    if process.returncode != 0:
+        err = stderr.decode('utf-8').strip() or stdout.decode('utf-8').strip()
+        return False, err
+    return True, ""
+
 
 STICKER_MIMES = {"image/webp", "application/x-tgsticker"}
 
@@ -48,7 +102,7 @@ def is_public_entity(entity) -> bool:
 async def get_or_create_topic(group_title: str) -> int:
     dest_entity = await user_client.get_entity(DEST_GROUP_ID)
     result = await user_client(GetForumTopicsRequest(
-        channel=dest_entity, offset_date=0, offset_id=0, offset_topic=0, limit=100, q=group_title
+        peer=dest_entity, offset_date=0, offset_id=0, offset_topic=0, limit=100, q=group_title
     ))
     for topic in result.topics:
         if topic.title.lower() == group_title.lower():
@@ -56,7 +110,7 @@ async def get_or_create_topic(group_title: str) -> int:
             return topic.id
 
     log.info(f"สร้าง topic ใหม่ '{group_title}'...")
-    created = await user_client(CreateForumTopicRequest(channel=dest_entity, title=group_title))
+    created = await user_client(CreateForumTopicRequest(peer=dest_entity, title=group_title))
     return created.updates[0].id
 
 async def _forward_to_topic(from_peer, dest, msg_ids: list[int], thread_id: int) -> None:
@@ -103,7 +157,12 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
 
     already_sent = db.get_sent(src_key)
     raw_messages = []
+    scan_count = 0
     async for msg in user_client.iter_messages(source_entity, reverse=True):
+        scan_count += 1
+        if scan_count > MAX_SCAN_MESSAGES:
+            log.warning(f"clone_group: สแกนถึงขีดจำกัด {MAX_SCAN_MESSAGES} messages")
+            break
         if is_supported_media(msg) and msg.id not in already_sent:
             raw_messages.append(msg)
 
@@ -163,7 +222,7 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
                     await _forward_to_topic(source_entity, dest_entity, msg_ids, thread_id)
                     async with lock:
                         counters["success"] += len(batch)
-                        db.mark_sent(src_key, set(msg_ids))
+                        db.mark_sent_sync(src_key, set(msg_ids))
                 except (FloodWaitError, FloodPremiumWaitError) as e:
                     wait_s = _flood_seconds(e)
                     await asyncio.sleep(wait_s + 2)
@@ -182,8 +241,18 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
             async with sem:
                 try:
                     for msg in batch:
-                        p = await user_client.download_media(msg, file=str(job_dir) + "/")
-                        if p: paths.append(p)
+                        for attempt in range(3):
+                            try:
+                                p = await user_client.download_media(msg, file=str(job_dir) + "/")
+                                if p: paths.append(p)
+                                break
+                            except Exception as e:
+                                if attempt == 2:
+                                    log.warning(f"[up {b_idx}] skip msg {msg.id}: {e}")
+                                else:
+                                    await asyncio.sleep(2 * (attempt + 1))
+                    if not paths:
+                        return
                     caption = batch[-1].text or ""
                     if len(paths) == 1:
                         await user_client.send_file(dest_entity, file=paths[0], caption=caption, reply_to=thread_id, parse_mode="md")
@@ -192,7 +261,7 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
                         await user_client.send_file(dest_entity, file=paths, caption=captions, reply_to=thread_id, parse_mode="md")
                     async with lock:
                         counters["success"] += len(batch)
-                        db.mark_sent(src_key, {m.id for m in batch})
+                        db.mark_sent_sync(src_key, {m.id for m in batch})
                 except (FloodWaitError, FloodPremiumWaitError) as e:
                     wait_s = _flood_seconds(e)
                     await asyncio.sleep(wait_s + 2)
@@ -210,6 +279,9 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
 
     await asyncio.gather(*[process_batch(i, b) for i, b in enumerate(batches, 1)])
     
+    # persist all sent IDs in one write
+    await db.save_sent()
+
     if not use_forward: shutil.rmtree(job_dir, ignore_errors=True)
     
     await status_cb(
@@ -296,216 +368,143 @@ async def clone_single_message(chat: str | int, msg_id: int, status_cb: StatusCb
 
     await status_cb(f"✅ ส่งสำเร็จ!\n• Chat: **{chat_title}**\n• ไฟล์: {len(batch)}\n• Mode: {actual_mode}")
 
+
+def _collect_files(job_dir: Path) -> list[str]:
+    """Collect media file paths from a directory (skip empty/non-media files)."""
+    media_exts = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.mp4', '.mkv', '.mov', '.webm', '.mp3', '.m4a', '.ogg', '.webp', '.avif', '.heic'}
+    paths = []
+    for root, _, files in os.walk(job_dir):
+        for file in files:
+            p = os.path.join(root, file)
+            ext = os.path.splitext(file)[1].lower()
+            if ext in media_exts and os.path.getsize(p) > 1024:
+                paths.append(p)
+    return paths
+
+
+async def _upload_to_group(paths: list[str], thread_id: int, site_name: str, status_cb: StatusCb, cleanup_dir: Path | None = None) -> None:
+    """Upload downloaded files to Telegram group, with per-file error handling."""
+    dest_entity = await user_client.get_entity(DEST_GROUP_ID)
+    try:
+        # Try batch first, fallback to individual on failure
+        for i in range(0, len(paths), 10):
+            batch_paths = paths[i:i+10]
+            try:
+                if len(batch_paths) == 1:
+                    await user_client.send_file(dest_entity, file=batch_paths[0], reply_to=thread_id)
+                else:
+                    await user_client.send_file(dest_entity, file=batch_paths, reply_to=thread_id)
+            except Exception:
+                # Fallback: send one by one
+                for p in batch_paths:
+                    try:
+                        await user_client.send_file(dest_entity, file=p, reply_to=thread_id)
+                    except Exception as e:
+                        log.warning(f"{site_name}: skip file {p}: {e}")
+        await status_cb(f"✅ ส่งไฟลจาก {site_name} สำเรจ!\n• Topic: **{site_name} Downloads**\n• จำนวน: {len(paths)} ไฟล")
+    except Exception as e:
+        log.error(f"{site_name} upload error: {e}")
+        await status_cb(f"❌ อปโหลดไฟลจาก {site_name} ลมเหลว: `{e}`")
+    finally:
+        if cleanup_dir:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
+
+
 async def clone_x_media(url: str, status_cb: StatusCb) -> None:
-    await status_cb(f"🔍 พบลิงก์ X\n📥 กำลังดาวน์โหลด...")
+    await status_cb(f"🔍 พบลิงก X\n📥 กำลงดาวนโหลด...")
     
-    # แยก ID โพสต์เพื่อสร้างโฟลเดอร์ชั่วคราว
     job_id = url.split('/')[-1].split('?')[0]
     job_dir = DOWNLOAD_DIR / f"x_{job_id}"
     job_dir.mkdir(parents=True, exist_ok=True)
     
-    # 🌟 เช็คไฟล์ cookies (สำหรับแอคเคาท์ Private)
-    cookies_arg = []
-    if Path("x_cookies.txt").exists():
-        cookies_arg = ["--cookies", "x_cookies.txt"]
-        
-    cmd = [
-        "gallery-dl",
-        *cookies_arg,
-        "-d", str(job_dir),
-        url
-    ]
+    cookies = _cookie_args("x")
+    ok, err = await _run_gallery_dl(url, job_dir, cookies)
     
-    # สั่งรันคำสั่งโหลดเบื้องหลัง
-    process = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    stdout, stderr = await process.communicate()
-    
-    if process.returncode != 0:
-        err = stderr.decode('utf-8').strip() or stdout.decode('utf-8').strip()
-        await status_cb(f"❌ ดาวน์โหลด X ล้มเหลว:\n`{err}`\n\n💡 หมายเหตุ: หากบัญชีตั้ง Private คุณต้องใส่ไฟล์ `x_cookies.txt` ไว้ที่โฟลเดอร์หลักของบอท")
+    if not ok:
+        hint = f"\n\n💡 หากบญชต้ Private คณตองใสไฟล `cookies_x.txt` ไวทโฟลเดอรหลักของบอท" if not cookies else ""
+        await status_cb(f"❌ ดาวนโหลด X ลมเหลว:\n`{err}`{hint}")
         shutil.rmtree(job_dir, ignore_errors=True)
         return
 
-    # รวบรวมไฟล์ที่โหลดมาได้
-    paths = []
-    for root, _, files in os.walk(job_dir):
-        for file in files:
-            paths.append(os.path.join(root, file))
-            
+    paths = _collect_files(job_dir)
+    
     if not paths:
-        await status_cb(f"⚠️ ไม่พบรูปภาพ/วิดีโอในโพสต์นี้ หรือบอทไม่มีสิทธิ์เข้าถึง (ต้องใช้ Cookies)")
+        await status_cb(f"⚠️ ไมพบรป/วดโอสานี หรอบทไมมสิทธเข้ถึง (ตองใช Cookies)")
         shutil.rmtree(job_dir, ignore_errors=True)
         return
         
-    await status_cb(f"✅ โหลดสำเร็จ {len(paths)} ไฟล์\n📤 กำลังอัปโหลดลงกลุ่ม...")
-    
-    # 🌟 ระบุ Topic ปลายทาง (บอทจะสร้าง Topic ชื่อนี้ในกลุ่มให้อัตโนมัติ)
+    await status_cb(f"✅ โหลดสำเร็จ {len(paths)} ไฟล\n📤 กำลงอปโหลดลงกลุม...")
     topic_name = "X Downloads"
     try:
         thread_id = await get_or_create_topic(topic_name)
     except Exception as e:
-        await status_cb(f"❌ สร้าง/หา topic ล้มเหลว: `{e}`")
+        await status_cb(f"❌ สร้าง/หา topic ลมเหลว: `{e}`")
         return
-        
-    dest_entity = await user_client.get_entity(DEST_GROUP_ID)
-    
-    try:
-        # Telegram ส่งไฟล์ได้ทีละ 10 ไฟล์ต่อ 1 ชุด (Album)
-        for i in range(0, len(paths), 10):
-            batch_paths = paths[i:i+10]
-            if len(batch_paths) == 1:
-                await user_client.send_file(dest_entity, file=batch_paths[0], reply_to=thread_id)
-            else:
-                await user_client.send_file(dest_entity, file=batch_paths, reply_to=thread_id)
-                
-        await status_cb(f"✅ ส่งไฟล์จาก X สำเร็จ!\n• Topic: **{topic_name}**\n• จำนวน: {len(paths)} ไฟล์")
-    except Exception as e:
-        log.error(f"X upload error: {e}")
-        await status_cb(f"❌ อัปโหลดไฟล์จาก X ล้มเหลว: `{e}`")
-    finally:
-        shutil.rmtree(job_dir, ignore_errors=True)
+    await _upload_to_group(paths, thread_id, "X", status_cb, cleanup_dir=job_dir)
 
 async def clone_ig_media(url: str, status_cb: StatusCb) -> None:
-    await status_cb(f"🔍 พบลิงก์ Instagram\n📥 กำลังดาวน์โหลด...")
+    await status_cb(f"🔍 พบลิงก Instagram\n📥 กำลงดาวนโหลด...")
     
-    import time
-    # สร้างโฟลเดอร์ชั่วคราวโดยใช้เวลาปัจุบันป้องกันชื่อซ้ำ
     job_id = str(int(time.time()))
     job_dir = DOWNLOAD_DIR / f"ig_{job_id}"
     job_dir.mkdir(parents=True, exist_ok=True)
     
-    # 🌟 เช็คไฟล์ cookies (Instagram บังคับต้องใช้ตลอด)
-    cookies_arg = []
-    if Path("ig_cookies.txt").exists():
-        cookies_arg = ["--cookies", "ig_cookies.txt"]
-    else:
-        await status_cb(f"❌ ดาวน์โหลดล้มเหลว: ไม่พบไฟล์ `ig_cookies.txt`\n💡 บังคับต้องใช้ Cookies สำหรับ Instagram")
+    cookies = _cookie_args("ig")
+    if not cookies:
+        await status_cb(f"❌ ดาวนโหลดลมเหลว: ไมพบไฟล `cookies_ig.txt`\n💡 บังคบทองใช Cookies สหกรบ Instagram")
         shutil.rmtree(job_dir, ignore_errors=True)
         return
-        
-    cmd = [
-        "gallery-dl",
-        *cookies_arg,
-        "-d", str(job_dir),
-        url
-    ]
     
-    process = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    stdout, stderr = await process.communicate()
-    
-    if process.returncode != 0:
-        err = stderr.decode('utf-8').strip() or stdout.decode('utf-8').strip()
-        await status_cb(f"❌ ดาวน์โหลด Instagram ล้มเหลว:\n`{err}`\n\n💡 คุกกี้อาจหมดอายุ ให้ลองดึงไฟล์ `ig_cookies.txt` ใหม่อีกครั้ง")
+    ok, err = await _run_gallery_dl(url, job_dir, cookies)
+    if not ok:
+        await status_cb(f"❌ ดาวนโหลด Instagram ลมเหลว:\n`{err}`\n\n💡 คกก อาจหมดอายุ ใหลองดงไฟล `cookies_ig.txt` ใหมอกครง")
         shutil.rmtree(job_dir, ignore_errors=True)
         return
 
-    # รวบรวมไฟล์
-    paths = []
-    for root, _, files in os.walk(job_dir):
-        for file in files:
-            paths.append(os.path.join(root, file))
-            
+    paths = _collect_files(job_dir)
+    
     if not paths:
-        await status_cb(f"⚠️ ไม่พบรูปภาพ/วิดีโอ (อาจเป็นโพสต์ที่ถูกลบไปแล้ว)")
+        await status_cb(f"⚠️ ไมพบรป/วดโ (อาจเปนปสตทถกกลบไปแลว)")
         shutil.rmtree(job_dir, ignore_errors=True)
         return
         
-    await status_cb(f"✅ โหลดสำเร็จ {len(paths)} ไฟล์\n📤 กำลังอัปโหลดลงกลุ่ม...")
-    
+    await status_cb(f"✅ โหลดสำเร็จ {len(paths)} ไฟล\n📤 กำลงอปโหลดลงกลุม...")
     topic_name = "Instagram Downloads"
     try:
         thread_id = await get_or_create_topic(topic_name)
     except Exception as e:
-        await status_cb(f"❌ สร้าง/หา topic ล้มเหลว: `{e}`")
+        await status_cb(f"❌ สร้าง/หา topic ลมเหลว: `{e}`")
         return
-        
-    dest_entity = await user_client.get_entity(DEST_GROUP_ID)
-    
-    try:
-        for i in range(0, len(paths), 10):
-            batch_paths = paths[i:i+10]
-            if len(batch_paths) == 1:
-                await user_client.send_file(dest_entity, file=batch_paths[0], reply_to=thread_id)
-            else:
-                await user_client.send_file(dest_entity, file=batch_paths, reply_to=thread_id)
-                
-        await status_cb(f"✅ ส่งไฟล์จาก Instagram สำเร็จ!\n• Topic: **{topic_name}**\n• จำนวน: {len(paths)} ไฟล์")
-    except Exception as e:
-        log.error(f"IG upload error: {e}")
-        await status_cb(f"❌ อัปโหลดไฟล์จาก Instagram ล้มเหลว: `{e}`")
-    finally:
-        shutil.rmtree(job_dir, ignore_errors=True)
+    await _upload_to_group(paths, thread_id, "IG", status_cb, cleanup_dir=job_dir)
 
 async def clone_tiktok_media(url: str, status_cb: StatusCb) -> None:
-    await status_cb(f"🔍 พบลิงก์ TikTok\n📥 กำลังดาวน์โหลด...")
+    await status_cb(f"🔍 พบลิงก TikTok\n📥 กำลงดาวนโหลด...")
     
-    import time
-    # ใช้เวลาปัจจุบันเป็น ID โฟลเดอร์ (เพราะลิงก์สั้นของ TikTok ดึง ID จาก URL ยาก)
     job_id = str(int(time.time()))
     job_dir = DOWNLOAD_DIR / f"tiktok_{job_id}"
     job_dir.mkdir(parents=True, exist_ok=True)
     
-    # 🌟 เช็คไฟล์ cookies (เผื่อไว้ในกรณีที่ TikTok บล็อกการเข้าถึง)
-    cookies_arg = []
-    if Path("tiktok_cookies.txt").exists():
-        cookies_arg = ["--cookies", "tiktok_cookies.txt"]
-        
-    cmd = [
-        "gallery-dl",
-        *cookies_arg,
-        "-d", str(job_dir),
-        url
-    ]
+    cookies = _cookie_args("tiktok")
+    ok, err = await _run_gallery_dl(url, job_dir, cookies)
     
-    process = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    stdout, stderr = await process.communicate()
-    
-    if process.returncode != 0:
-        err = stderr.decode('utf-8').strip() or stdout.decode('utf-8').strip()
-        await status_cb(f"❌ ดาวน์โหลด TikTok ล้มเหลว:\n`{err}`\n\n💡 หากโดนบล็อก ให้ใส่ไฟล์ `tiktok_cookies.txt` ไว้ในโฟลเดอร์บอท")
+    if not ok:
+        hint = f"\n\n💡 หากโดนบล็อก ใหใสไฟล `cookies_tiktok.txt` ไวในโฟลเดอรบอท" if not cookies else ""
+        await status_cb(f"❌ ดาวนโหลด TikTok ลมเหลว:\n`{err}`{hint}")
         shutil.rmtree(job_dir, ignore_errors=True)
         return
 
-    # รวบรวมไฟล์ที่โหลดมาได้
-    paths = []
-    for root, _, files in os.walk(job_dir):
-        for file in files:
-            paths.append(os.path.join(root, file))
-            
+    paths = _collect_files(job_dir)
+    
     if not paths:
-        await status_cb(f"⚠️ ไม่พบวิดีโอ (โพสต์อาจถูกลบ หรือตั้งเป็นส่วนตัว)")
+        await status_cb(f"⚠️ ไมพบวดโ (ปสตอาจถกกลบ หร ตั้งเปนสวนตัว)")
         shutil.rmtree(job_dir, ignore_errors=True)
         return
         
-    await status_cb(f"✅ โหลดสำเร็จ {len(paths)} ไฟล์\n📤 กำลังอัปโหลดลงกลุ่ม...")
-    
+    await status_cb(f"✅ โหลดสำเร็จ {len(paths)} ไฟล\n📤 กำลงอปโหลดลงกลุม...")
     topic_name = "TikTok Downloads"
     try:
         thread_id = await get_or_create_topic(topic_name)
     except Exception as e:
-        await status_cb(f"❌ สร้าง/หา topic ล้มเหลว: `{e}`")
+        await status_cb(f"❌ สร้าง/หา topic ลมเหลว: `{e}`")
         return
-        
-    dest_entity = await user_client.get_entity(DEST_GROUP_ID)
-    
-    try:
-        # อัปโหลดไฟล์กลับเข้ากลุ่ม
-        for i in range(0, len(paths), 10):
-            batch_paths = paths[i:i+10]
-            if len(batch_paths) == 1:
-                await user_client.send_file(dest_entity, file=batch_paths[0], reply_to=thread_id)
-            else:
-                await user_client.send_file(dest_entity, file=batch_paths, reply_to=thread_id)
-                
-        await status_cb(f"✅ ส่งไฟล์จาก TikTok สำเร็จ!\n• Topic: **{topic_name}**\n• จำนวน: {len(paths)} ไฟล์")
-    except Exception as e:
-        log.error(f"TikTok upload error: {e}")
-        await status_cb(f"❌ อัปโหลดไฟล์จาก TikTok ล้มเหลว: `{e}`")
-    finally:
-        shutil.rmtree(job_dir, ignore_errors=True)
+    await _upload_to_group(paths, thread_id, "TikTok", status_cb, cleanup_dir=job_dir)

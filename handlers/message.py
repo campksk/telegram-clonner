@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import re
 from telethon import events
@@ -49,6 +50,7 @@ async def handle_message(event: events.NewMessage.Event):
         async def _run_x():
             try:
                 await worker.clone_x_media(arg, status_cb)
+                await db.mark_url_sent(arg)
             except asyncio.CancelledError:
                 await status_cb(f"🛑 ยกเลิกโหลด X แล้ว")
             finally:
@@ -69,6 +71,7 @@ async def handle_message(event: events.NewMessage.Event):
         async def _run_ig():
             try:
                 await worker.clone_ig_media(arg, status_cb)
+                await db.mark_url_sent(arg)
             except asyncio.CancelledError:
                 await status_cb(f"🛑 ยกเลิกโหลด Instagram แล้ว")
             finally:
@@ -81,12 +84,12 @@ async def handle_message(event: events.NewMessage.Event):
     # 🌟 เพิ่มส่วนดักจับ TikTok (รองรับทั้งเว็บปกติและลิงก์แชร์แบบสั้น)
     tiktok_match = re.search(r"https?://(?:www\.|vm\.|vt\.)?tiktok\.com/\S+", arg)
     if tiktok_match:
-        import time
-        task_key = f"tiktok_{int(time.time())}"
+        task_key = f"tiktok_{hashlib.md5(arg.encode()).hexdigest()[:12]}"
         
         async def _run_tiktok():
             try:
                 await worker.clone_tiktok_media(arg, status_cb)
+                await db.mark_url_sent(arg)
             except asyncio.CancelledError:
                 await status_cb(f"🛑 ยกเลิกโหลด TikTok แล้ว")
             finally:
@@ -110,8 +113,11 @@ async def handle_message(event: events.NewMessage.Event):
         source = pub_match.group(1)
     elif re.fullmatch(r"-?\d+", arg):
         source = int(arg)
-    else:
+    elif re.match(r"^[\w.\-]{4,}$", arg):
         source = arg
+    else:
+        await status_cb(f"⚠️ not recognized: `{arg}`\nSend a t.me link, numeric ID, or username")
+        return
 
     task_key = str(arg)
     if task_key in active_tasks and not active_tasks[task_key].done():

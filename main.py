@@ -6,14 +6,21 @@ from telethon.tl.types import BotCommand, BotCommandScopeDefault
 
 import db
 import worker
-from config import bot_client, user_client, BOT_TOKEN, ALLOWED_USERS, active_tasks
+from config import bot_client, user_client, BOT_TOKEN, ALLOWED_USERS, active_tasks, DEST_GROUP_ID
 import handlers  # Registers events
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("clone-bot.main")
 
 async def main():
+    # Validate config at startup
+    if not DEST_GROUP_ID or DEST_GROUP_ID == 0:
+        log.error("DEST_GROUP_ID not set! Set it in .env and restart.")
+        sys.exit(1)
+    log.info(f"Config: DEST_GROUP_ID={DEST_GROUP_ID}")
+    
     db.load_sent()
+    db.load_sent_urls()
     log.info("กำลังเชื่อมต่อ User client...")
     await user_client.start()
     log.info("กำลังเชื่อมต่อ Bot client...")

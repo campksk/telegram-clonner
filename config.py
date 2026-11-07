@@ -21,6 +21,7 @@ BOT_TOKEN     = os.getenv("BOT_TOKEN", "")
 DEST_GROUP_ID = int(os.getenv("DEST_GROUP_ID", "0"))
 SEND_DELAY    = float(os.getenv("SEND_DELAY", "1.5"))
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "3"))
+MAX_SCAN_MESSAGES = int(os.getenv("MAX_SCAN_MESSAGES", "10000"))
 ALLOWED_USERS = set(int(x.strip()) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip())
 
 logging.basicConfig(

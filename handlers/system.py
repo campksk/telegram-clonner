@@ -1,4 +1,5 @@
 import platform
+import sys
 import time
 import psutil
 from telethon import events
@@ -11,7 +12,8 @@ async def handle_ping(event: events.NewMessage.Event):
     if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS: return
     cpu = psutil.cpu_percent(interval=0.5)
     ram = psutil.virtual_memory()
-    disk = psutil.disk_usage("/")
+    import os
+    disk = psutil.disk_usage(os.path.dirname(os.path.abspath(__file__)))
     uptime = int(time.time() - psutil.boot_time())
     h, rem = divmod(uptime, 3600)
     m, s = divmod(rem, 60)

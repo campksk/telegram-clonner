@@ -1,5 +1,5 @@
-telethon==1.36.0
-python-dotenv==1.0.1
-aiofiles==23.2.1
-psutil==6.1.1
-gallery-dl==1.32.4
+telethon==1.45.0
+python-dotenv==1.2.4
+aiofiles==25.1.0
+psutil==7.2.2
+gallery-dl==1.32.19
