@@ -101,16 +101,36 @@ def is_public_entity(entity) -> bool:
 
 async def get_or_create_topic(group_title: str) -> int:
     dest_entity = await user_client.get_entity(DEST_GROUP_ID)
-    result = await user_client(GetForumTopicsRequest(
-        peer=dest_entity, offset_date=0, offset_id=0, offset_topic=0, limit=100, q=group_title
-    ))
-    for topic in result.topics:
-        if topic.title.lower() == group_title.lower():
-            log.info(f"พบ topic: '{topic.title}' (id={topic.id})")
-            return topic.id
+    search_title = group_title.strip().lower()
+
+    # Pass 1: q search (fast)
+    try:
+        result = await user_client(GetForumTopicsRequest(
+            peer=dest_entity, offset_date=0, offset_id=0, offset_topic=0, limit=100, q=group_title
+        ))
+        for topic in result.topics:
+            if topic.title.strip().lower() == search_title:
+                log.info(f"พบ topic: '{topic.title}' (id={topic.id})")
+                return topic.id
+    except Exception:
+        pass
+
+    # Pass 2: full scan without q (paginate all topics)
+    offset_id = 0
+    while True:
+        result = await user_client(GetForumTopicsRequest(
+            peer=dest_entity, offset_date=0, offset_id=offset_id, offset_topic=0, limit=100
+        ))
+        if not result.topics:
+            break
+        for topic in result.topics:
+            if topic.title.strip().lower() == search_title:
+                log.info(f"พบ topic (full scan): '{topic.title}' (id={topic.id})")
+                return topic.id
+        offset_id = result.topics[-1].id
 
     log.info(f"สร้าง topic ใหม่ '{group_title}'...")
-    created = await user_client(CreateForumTopicRequest(peer=dest_entity, title=group_title))
+    created = await user_client(CreateForumTopicRequest(peer=dest_entity, title=group_title.strip()))
     return created.updates[0].id
 
 async def _forward_to_topic(from_peer, dest, msg_ids: list[int], thread_id: int) -> None:
