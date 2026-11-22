@@ -47,10 +47,10 @@ async def _run_gallery_dl(url: str, job_dir: Path, cookies: list[str]) -> tuple[
     except RuntimeError as e:
         return False, str(e)
 
+    process = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
     try:
-        process = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
         stdout, stderr = await asyncio.wait_for(
             process.communicate(), timeout=GALLERY_DL_TIMEOUT
         )
@@ -58,9 +58,12 @@ async def _run_gallery_dl(url: str, job_dir: Path, cookies: list[str]) -> tuple[
         process.kill()
         await process.communicate()
         return False, f"gallery-dl timeout ({GALLERY_DL_TIMEOUT}s)"
+    except asyncio.CancelledError:
+        process.kill()  # /cancel or shutdown: don't leave an orphan gallery-dl running
+        raise
 
     if process.returncode != 0:
-        err = stderr.decode('utf-8').strip() or stdout.decode('utf-8').strip()
+        err = stderr.decode("utf-8", "replace").strip() or stdout.decode("utf-8", "replace").strip()
         return False, err
     return True, ""
 
@@ -96,9 +99,13 @@ def collect_files_grouped(job_dir: Path) -> list[list[str]]:
     return list(groups.values())
 
 
-async def upload_to_group(paths: list[list[str]], thread_id: int, site_name: str, status_cb: StatusCb, cleanup_dir: Path | None = None) -> None:
-    """Upload downloaded files to Telegram group, with per-file error handling."""
+async def upload_to_group(paths: list[list[str]], thread_id: int, site_name: str, status_cb: StatusCb, cleanup_dir: Path | None = None) -> bool:
+    """Upload downloaded files to the Telegram group, with per-file error handling.
+
+    Returns True only if at least one file was actually sent.
+    """
     total_files = sum(len(g) for g in paths)
+    sent_files = 0
     dest_entity = await user_client.get_entity(DEST_GROUP_ID)
     try:
         for group in paths:
@@ -110,18 +117,26 @@ async def upload_to_group(paths: list[list[str]], thread_id: int, site_name: str
                         await user_client.send_file(dest_entity, file=batch[0], reply_to=thread_id)
                     else:
                         await user_client.send_file(dest_entity, file=batch, reply_to=thread_id)
+                    sent_files += len(batch)
                 except Exception:
                     # Fallback: send one by one
                     for p in batch:
                         try:
                             await user_client.send_file(dest_entity, file=p, reply_to=thread_id)
+                            sent_files += 1
                         except Exception as e:
                             log.warning(f"{site_name}: skip file {p}: {e}")
             await asyncio.sleep(0.5)  # small delay between posts
-        await status_cb(f"✅ Files from {site_name} sent successfully!\n• Topic: **{site_name} Downloads**\n• Count: {len(paths)} files")
     except Exception as e:
         log.error(f"{site_name} upload error: {e}")
         await status_cb(f"❌ Failed to upload files from {site_name}: `{e}`")
+        return False
     finally:
         if cleanup_dir:
             shutil.rmtree(cleanup_dir, ignore_errors=True)
+
+    if sent_files == 0:
+        await status_cb(f"❌ Failed to upload any file from {site_name}")
+        return False
+    await status_cb(f"✅ Files from {site_name} sent successfully!\n• Topic: **{site_name} Downloads**\n• Count: {sent_files}/{total_files} files")
+    return True
