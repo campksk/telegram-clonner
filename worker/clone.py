@@ -106,6 +106,7 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
     async def _update_progress():
         done_now = counters["done"]
         if done_now % 10 == 0 or done_now == total_batches:
+            await db.save_sent()  # checkpoint so a crash/kill loses at most ~10 groups of progress
             async with progress_lock:
                 await status_cb(
                     f"⏳ Progress: {counters['success'] + counters['failed']}/{total_files} files "
@@ -179,13 +180,14 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
                     await _update_progress()
                     await asyncio.sleep(SEND_DELAY / PARALLEL_WORKERS)
 
-    await asyncio.gather(*[process_batch(i, b) for i, b in enumerate(batches, 1)])
-    
-    # persist all sent IDs in one write
-    await db.save_sent()
+    try:
+        await asyncio.gather(*[process_batch(i, b) for i, b in enumerate(batches, 1)])
+    finally:
+        # Runs on success, /cancel and errors alike, so already-sent IDs are never forgotten
+        # (otherwise a cancelled job re-sends everything next time).
+        await db.save_sent()
+        if not use_forward: shutil.rmtree(job_dir, ignore_errors=True)
 
-    if not use_forward: shutil.rmtree(job_dir, ignore_errors=True)
-    
     await status_cb(
         f"✅ Clone complete!\n• Source: **{title}**\n• Mode: {mode_label}\n• Topic: `{thread_id}`\n"
         f"• Success: {counters['success']}/{total_files} files\n• Failed: {counters['failed']}/{total_files} files"

@@ -1,6 +1,7 @@
 import json
 import logging
 import asyncio
+import os
 from pathlib import Path
 
 import aiofiles
@@ -30,14 +31,26 @@ def load_sent() -> None:
         _sent_db = {}
 
 
+def _write_atomic(path: Path, data: str) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(data, encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 async def save_sent() -> None:
     # backup before overwrite
     if SENT_DB_PATH.exists() and not SENT_DB_BACKUP.exists():
         SENT_DB_BACKUP.write_text(SENT_DB_PATH.read_text(encoding="utf-8"), encoding="utf-8")
     try:
         data = json.dumps({k: list(v) for k, v in _sent_db.items()}, ensure_ascii=False)
-        async with aiofiles.open(SENT_DB_PATH, "w", encoding="utf-8") as f:
-            await f.write(data)
+        # Written synchronously on purpose: there is no await between serialising and replacing
+        # the file, so concurrent jobs can never interleave writes, and a crash mid-write
+        # leaves the previous file intact (write to a temp file, then atomic replace).
+        _write_atomic(SENT_DB_PATH, data)
     except Exception as e:
         log.error(f"บันทึก sent_db ล้มเหลว: {e}")
 

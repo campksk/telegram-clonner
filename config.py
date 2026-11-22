@@ -9,7 +9,7 @@ from telethon import TelegramClient
 load_dotenv()
 
 BASE_DIR     = Path(__file__).parent
-SESSION_DIR  = BASE_DIR / "sessions"
+SESSION_DIR  = Path(os.getenv("SESSION_DIR", str(BASE_DIR / "sessions")))
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", str(BASE_DIR / "downloads")))
 
 SESSION_DIR.mkdir(exist_ok=True)
