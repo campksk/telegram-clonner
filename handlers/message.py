@@ -7,16 +7,11 @@ from telethon import events
 import db
 import worker
 from config import bot_client, ALLOWED_USERS, active_tasks
+from parsing import MESSAGE_PATTERN, extract_target, parse_source, parse_tg_link
 
 log = logging.getLogger("clone-bot.message")
 
-def parse_tg_link(url: str):
-    m = re.search(r"https?://t\.me/(?:(?P<username>[^/c][^/]*)/(?P<msg_id>\d+)|c/(?P<chat_id>\d+)/(?P<priv_msg_id>\d+))", url)
-    if not m: return None
-    if m.group("username"): return m.group("username"), int(m.group("msg_id"))
-    else: return int("-100" + m.group("chat_id")), int(m.group("priv_msg_id"))
-
-@bot_client.on(events.NewMessage(pattern=r"^(?!/)(.+)$"))
+@bot_client.on(events.NewMessage(pattern=MESSAGE_PATTERN))
 async def handle_message(event: events.NewMessage.Event):
     # 🌟 เพิ่ม 2 บรรทัดนี้: ถ้าข้อความไม่ได้มาจากแชทส่วนตัว ให้หยุดการทำงานทันที
     if not event.is_private:
@@ -25,7 +20,9 @@ async def handle_message(event: events.NewMessage.Event):
     if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS:
         return
 
-    arg = (event.pattern_match.group(1) or "").strip()
+    # Use only the first URL of the message (links are often pasted with extra text or on
+    # several lines); a bare ID/username with no URL is kept as-is.
+    arg = extract_target(event.pattern_match.group(1) or "")
     if not arg: return
     
     status_msg = await event.reply(f"🚀 กำลังประมวลผล `{arg}`...")
@@ -99,23 +96,9 @@ async def handle_message(event: events.NewMessage.Event):
         return
     # (สิ้นสุดส่วน TikTok)
 
-    # (โค้ดด้านล่างเป็นส่วนของ Public/Private Group แบบเดิม ปล่อยไว้เหมือนเดิม)
-    source = None
-    priv_match = re.search(r"t\.me/c/(\d+)", arg)
-
-    source = None
-    priv_match = re.search(r"t\.me/c/(\d+)", arg)
-    pub_match = re.search(r"t\.me/([^/]+)/?$", arg)
-
-    if priv_match:
-        source = int("-100" + priv_match.group(1))
-    elif pub_match and not pub_match.group(1).startswith("+") and pub_match.group(1) != "joinchat":
-        source = pub_match.group(1)
-    elif re.fullmatch(r"-?\d+", arg):
-        source = int(arg)
-    elif re.match(r"^[\w.\-]{4,}$", arg):
-        source = arg
-    else:
+    # Whole group / channel / user
+    source = parse_source(arg)
+    if source is None:
         await status_cb(f"⚠️ not recognized: `{arg}`\nSend a t.me link, numeric ID, or username")
         return
 

@@ -48,3 +48,10 @@ Export: ใช้ extension [Get cookies.txt LOCALLY](https://chromewebstore.goo
 | Jobs | `/jobs` |
 | Status | `/ping` |
 วางลิงก์ปุ๊บ บอทโคลนให้อัตโนมัติ! โครงสร้างใหม่แบบ Clean Architecture ดูแลรักษาง่ายกว่าเดิม
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
