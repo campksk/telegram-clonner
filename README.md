@@ -19,7 +19,7 @@
 | ALLOWED_USER_IDS | ID ผู้ใช้ที่มีสิทธิ (คั่่นดวย ,) |
 | SEND_DELAY | ความล่าชั่้าระหว่่างส่่ง (sec) |
 | PARALLEL_WORKERS | จำนวน worker ซ้อนกั่่น |
-| MAX_SCAN_MESSAGES | ขีดจำกัดสแกน message (default: 10000) |
+| MAX_SCAN_MESSAGES | จำนวน media ใหม่สูงสุดต่อการรัน 1 ครั้ง (default: 10000) ส่งลิงก์เดิมซ้ำเพื่อทำต่อ |
 | DOWNLOAD_DIR | โฟลเดอร์ดาวนโหลดชั่่วคราว |
 
 ## Cookies

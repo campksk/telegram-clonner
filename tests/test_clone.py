@@ -89,3 +89,33 @@ def test_progress_is_checkpointed_during_run(env, monkeypatch):
     use_messages(monkeypatch, [make_msg(i) for i in range(1, 13)])
     asyncio.run(clone.clone_group("src", noop))
     assert sorted(snapshot["data"]["42"]) == list(range(1, 11))
+
+def test_scan_limit_counts_only_new_media(env, monkeypatch):
+    monkeypatch.setattr(clone, "MAX_SCAN_MESSAGES", 10)
+    db._sent_db["42"] = set(range(1, 21))        # 20 already sent; the limit must not be eaten by them
+    forwarded = []
+
+    async def fwd(src, dest, ids, thread_id):
+        forwarded.append(ids)
+
+    monkeypatch.setattr(clone, "forward_to_topic", fwd)
+    use_messages(monkeypatch, [make_msg(i) for i in range(1, 26)])
+    asyncio.run(clone.clone_group("src", noop))
+    assert sorted(i for ids in forwarded for i in ids) == [21, 22, 23, 24, 25]
+
+
+def test_limit_does_not_split_an_album_and_tells_user(env, monkeypatch):
+    monkeypatch.setattr(clone, "MAX_SCAN_MESSAGES", 3)
+    forwarded, statuses = [], []
+
+    async def fwd(src, dest, ids, thread_id):
+        forwarded.append(ids)
+
+    async def status(text):
+        statuses.append(text)
+
+    monkeypatch.setattr(clone, "forward_to_topic", fwd)
+    use_messages(monkeypatch, [make_msg(1), make_msg(2), make_msg(3, 9), make_msg(4, 9), make_msg(5), make_msg(6)])
+    asyncio.run(clone.clone_group("src", status))
+    assert forwarded == [[1], [2], [3, 4]]
+    assert any("MAX_SCAN_MESSAGES" in t for t in statuses)

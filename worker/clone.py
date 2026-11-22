@@ -59,14 +59,20 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
         return
 
     raw_messages = []
-    scan_count = 0
+    limit_hit = False
     async for msg in user_client.iter_messages(source_entity, reverse=True):
-        scan_count += 1
-        if scan_count > MAX_SCAN_MESSAGES:
-            log.warning(f"clone_group: Scan limit reached {MAX_SCAN_MESSAGES} messages")
+        if not is_supported_media(msg) or msg.id in already_sent:
+            continue
+        # MAX_SCAN_MESSAGES caps the NEW media taken per run. Already-sent messages don't count
+        # (otherwise chats with more than the limit could never reach their newest media), and an
+        # album that straddles the limit is finished rather than split.
+        if len(raw_messages) >= MAX_SCAN_MESSAGES and not (
+            msg.grouped_id and msg.grouped_id == raw_messages[-1].grouped_id
+        ):
+            limit_hit = True
+            log.warning(f"clone_group: reached limit of {MAX_SCAN_MESSAGES} new media for this run")
             break
-        if is_supported_media(msg) and msg.id not in already_sent:
-            raw_messages.append(msg)
+        raw_messages.append(msg)
 
     batches, album_buf, seen_albums = [], {}, []
     for msg in raw_messages:
@@ -191,6 +197,7 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
     await status_cb(
         f"✅ Clone complete!\n• Source: **{title}**\n• Mode: {mode_label}\n• Topic: `{thread_id}`\n"
         f"• Success: {counters['success']}/{total_files} files\n• Failed: {counters['failed']}/{total_files} files"
+        + (f"\n⚠️ Stopped at the MAX_SCAN_MESSAGES limit ({MAX_SCAN_MESSAGES} files per run) — send the same source again to continue" if limit_hit else "")
     )
 
 
