@@ -6,7 +6,7 @@ from telethon import events
 
 import db
 import worker
-from config import bot_client, ALLOWED_USERS, active_tasks
+from config import bot_client, is_allowed, active_tasks
 from parsing import MESSAGE_PATTERN, extract_target, parse_source, parse_tg_link
 
 log = logging.getLogger("clone-bot.message")
@@ -17,7 +17,7 @@ async def handle_message(event: events.NewMessage.Event):
     if not event.is_private:
         return
 
-    if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS:
+    if not is_allowed(event.sender_id):
         return
 
     # Use only the first URL of the message (links are often pasted with extra text or on

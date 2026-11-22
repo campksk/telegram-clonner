@@ -17,6 +17,9 @@ async def main():
     if not DEST_GROUP_ID or DEST_GROUP_ID == 0:
         log.error("DEST_GROUP_ID not set! Set it in .env and restart.")
         sys.exit(1)
+    if not ALLOWED_USERS:
+        log.error("ALLOWED_USER_IDS not set! The bot controls your Telegram user account, so at least one allowed user ID is required.")
+        sys.exit(1)
     log.info(f"Config: DEST_GROUP_ID={DEST_GROUP_ID}")
     
     db.load_sent()

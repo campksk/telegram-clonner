@@ -5,11 +5,11 @@ import psutil
 from telethon import events
 
 import db
-from config import bot_client, ALLOWED_USERS, active_tasks
+from config import bot_client, is_allowed, active_tasks
 
 @bot_client.on(events.NewMessage(pattern=r"^/ping$"))
 async def handle_ping(event: events.NewMessage.Event):
-    if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS: return
+    if not is_allowed(event.sender_id): return
     cpu = psutil.cpu_percent(interval=0.5)
     ram = psutil.virtual_memory()
     import os
@@ -29,7 +29,7 @@ async def handle_ping(event: events.NewMessage.Event):
 
 @bot_client.on(events.NewMessage(pattern=r"^/jobs$"))
 async def handle_jobs(event: events.NewMessage.Event):
-    if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS: return
+    if not is_allowed(event.sender_id): return
     running = [k for k, t in active_tasks.items() if not t.done()]
     if not running:
         await event.reply("ℹ️ ไม่มี job ที่กำลังทำงานอยู่")
@@ -39,7 +39,7 @@ async def handle_jobs(event: events.NewMessage.Event):
 
 @bot_client.on(events.NewMessage(pattern=r"^/cancel(?:\s+(.*))?$"))
 async def handle_cancel(event: events.NewMessage.Event):
-    if ALLOWED_USERS and event.sender_id not in ALLOWED_USERS: return
+    if not is_allowed(event.sender_id): return
     arg = (event.pattern_match.group(1) or "").strip()
     running = {k: t for k, t in active_tasks.items() if not t.done()}
     if not running:

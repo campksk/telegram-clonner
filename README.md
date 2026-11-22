@@ -16,7 +16,7 @@
 | API_HASH | Telegram API Hash |
 | BOT_TOKEN | Bot Token (from @BotFather) |
 | DEST_GROUP_ID | กลุ่่ม/ช่องปลายทาง (admin + Topics) |
-| ALLOWED_USER_IDS | ID ผู้ใช้ที่มีสิทธิ (คั่่นดวย ,) |
+| ALLOWED_USER_IDS | **จำเป็น** — ID ผู้ใช้ที่มีสิทธิสั่งบอท (คั่นด้วย ,) ถ้าว่างบอทจะไม่ยอมเริ่มทำงาน |
 | SEND_DELAY | ความล่าชั่้าระหว่่างส่่ง (sec) |
 | PARALLEL_WORKERS | จำนวน worker ซ้อนกั่่น |
 | MAX_SCAN_MESSAGES | จำนวน media ใหม่สูงสุดต่อการรัน 1 ครั้ง (default: 10000) ส่งลิงก์เดิมซ้ำเพื่อทำต่อ |
