@@ -2,8 +2,17 @@ downloads/
 sessions/
 .env
 __pycache__/
-sent_media.json
-pending_jobs.json
+venv/
+run.sh
 logs/
-*_cookies.txt
+.pytest_cache/
+
+# runtime state
 sent_media.json
+sent_media.json.bak
+sent_urls.json
+pending_jobs.json
+
+# cookies (contain logged-in sessions!)
+cookies_*.txt
+*_cookies.txt

@@ -4,21 +4,22 @@ import shutil
 from pathlib import Path
 from typing import Callable, Awaitable
 
-from telethon.errors import FloodWaitError, ChatAdminRequiredError
-from telethon.errors.rpcbaseerrors import FloodError
-try:
-    from telethon.errors import FloodPremiumWaitError
-except ImportError:
-    FloodPremiumWaitError = FloodError
+from telethon.errors import ChatAdminRequiredError, ChatWriteForbiddenError
 from telethon.tl.types import User as TLUser
 
 import db
-from config import DEST_GROUP_ID, DOWNLOAD_DIR, SEND_DELAY, PARALLEL_WORKERS, MAX_SCAN_MESSAGES, user_client
+from config import DEST_GROUP_ID, DOWNLOAD_DIR, SEND_DELAY, PARALLEL_WORKERS, PRESERVE_ORDER, MAX_SCAN_MESSAGES, user_client
 
-from worker.utils import _flood_seconds, is_supported_media, is_public_entity
+from worker.utils import FLOOD_ERRORS, retry_flood, is_supported_media, is_public_entity
+from worker.sender import pick_caption, send_media
 from worker.topics import get_or_create_topic, forward_to_topic
 
 log = logging.getLogger("clone-bot.worker.clone")
+
+DOWNLOAD_RETRY_DELAY = 2  # seconds, multiplied by the attempt number
+
+# Forward errors where copying the media instead cannot help (flooding / no right to post in the destination)
+NO_FALLBACK = (*FLOOD_ERRORS, ChatAdminRequiredError, ChatWriteForbiddenError)
 StatusCb = Callable[[str], Awaitable[None]]
 
 
@@ -59,14 +60,20 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
         return
 
     raw_messages = []
-    scan_count = 0
+    limit_hit = False
     async for msg in user_client.iter_messages(source_entity, reverse=True):
-        scan_count += 1
-        if scan_count > MAX_SCAN_MESSAGES:
-            log.warning(f"clone_group: Scan limit reached {MAX_SCAN_MESSAGES} messages")
+        if not is_supported_media(msg) or msg.id in already_sent:
+            continue
+        # MAX_SCAN_MESSAGES caps the NEW media taken per run. Already-sent messages don't count
+        # (otherwise chats with more than the limit could never reach their newest media), and an
+        # album that straddles the limit is finished rather than split.
+        if len(raw_messages) >= MAX_SCAN_MESSAGES and not (
+            msg.grouped_id and msg.grouped_id == raw_messages[-1].grouped_id
+        ):
+            limit_hit = True
+            log.warning(f"clone_group: reached limit of {MAX_SCAN_MESSAGES} new media for this run")
             break
-        if is_supported_media(msg) and msg.id not in already_sent:
-            raw_messages.append(msg)
+        raw_messages.append(msg)
 
     batches, album_buf, seen_albums = [], {}, []
     for msg in raw_messages:
@@ -106,6 +113,7 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
     async def _update_progress():
         done_now = counters["done"]
         if done_now % 10 == 0 or done_now == total_batches:
+            await db.save_sent()  # checkpoint so a crash/kill loses at most ~10 groups of progress
             async with progress_lock:
                 await status_cb(
                     f"⏳ Progress: {counters['success'] + counters['failed']}/{total_files} files "
@@ -113,82 +121,88 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
                     f"(✓{counters['success']} ✗{counters['failed']})"
                 )
 
-    job_dir = DOWNLOAD_DIR / src_key
-    if not use_forward: job_dir.mkdir(parents=True, exist_ok=True)
+    job_dir = DOWNLOAD_DIR / src_key  # created on first download (forward mode may never need it)
+
+    # Batches are downloaded/prepared in parallel but SENT in message order (when PRESERVE_ORDER):
+    # batch i may only send after batch i-1 has finished its send step. Each batch holds its
+    # semaphore slot until it has sent, and slots are handed out in batch order, so the oldest
+    # unsent batch always has a slot and this cannot deadlock.
+    turns = [asyncio.Event() for _ in range(len(batches) + 1)]
+    turns[0].set()
+
+    async def _download(b_idx, batch):
+        """Download a batch. Returns [(message, path)] for the files that arrived."""
+        job_dir.mkdir(parents=True, exist_ok=True)
+        got = []
+        for msg in batch:
+            for attempt in range(3):
+                try:
+                    p = await user_client.download_media(msg, file=str(job_dir) + "/")
+                    if p: got.append((msg, p))
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        log.warning(f"[up {b_idx}] skip msg {msg.id}: {e}")
+                    else:
+                        await asyncio.sleep(DOWNLOAD_RETRY_DELAY * (attempt + 1))
+        return got
 
     async def process_batch(b_idx, batch):
-        if use_forward:
-            async with sem:
-                try:
-                    msg_ids = [m.id for m in batch]
-                    await forward_to_topic(source_entity, dest_entity, msg_ids, thread_id)
-                    async with lock:
-                        counters["success"] += len(batch)
-                        db.mark_sent_sync(src_key, set(msg_ids))
-                except (FloodWaitError, FloodPremiumWaitError) as e:
-                    wait_s = _flood_seconds(e)
-                    await asyncio.sleep(wait_s + 2)
-                    async with lock: counters["failed"] += len(batch)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    log.error(f"[fwd {b_idx}] ✗ {e}")
-                    async with lock: counters["failed"] += len(batch)
-                finally:
-                    async with lock: counters["done"] += 1
-                    await _update_progress()
-                    await asyncio.sleep(SEND_DELAY / PARALLEL_WORKERS)
-        else:
-            paths = []
-            async with sem:
-                try:
-                    for msg in batch:
-                        for attempt in range(3):
-                            try:
-                                p = await user_client.download_media(msg, file=str(job_dir) + "/")
-                                if p: paths.append(p)
-                                break
-                            except Exception as e:
-                                if attempt == 2:
-                                    log.warning(f"[up {b_idx}] skip msg {msg.id}: {e}")
-                                else:
-                                    await asyncio.sleep(2 * (attempt + 1))
-                    if not paths:
-                        return
-                    caption = batch[-1].text or ""
-                    if len(paths) == 1:
-                        await user_client.send_file(dest_entity, file=paths[0], caption=caption, reply_to=thread_id, parse_mode="md")
-                    elif len(paths) > 1:
-                        captions = [caption] + [""] * (len(paths) - 1)
-                        await user_client.send_file(dest_entity, file=paths, caption=captions, reply_to=thread_id, parse_mode="md")
-                    async with lock:
-                        counters["success"] += len(batch)
-                        db.mark_sent_sync(src_key, {m.id for m in batch})
-                except (FloodWaitError, FloodPremiumWaitError) as e:
-                    wait_s = _flood_seconds(e)
-                    await asyncio.sleep(wait_s + 2)
-                    async with lock: counters["failed"] += len(batch)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    log.error(f"[up {b_idx}] ✗ {e}")
-                    async with lock: counters["failed"] += len(batch)
-                finally:
-                    for p in paths: Path(p).unlink(missing_ok=True)
-                    async with lock: counters["done"] += 1
-                    await _update_progress()
-                    await asyncio.sleep(SEND_DELAY / PARALLEL_WORKERS)
+        got, delivered = [], []
+        async with sem:
+            if not use_forward:
+                got = await _download(b_idx, batch)
+            if PRESERVE_ORDER:
+                await turns[b_idx - 1].wait()
+            try:
+                if use_forward:
+                    try:
+                        await retry_flood(
+                            lambda: forward_to_topic(source_entity, dest_entity, [m.id for m in batch], thread_id),
+                            f"forward {b_idx}")
+                        delivered = list(batch)
+                    except NO_FALLBACK:
+                        raise
+                    except Exception as e:
+                        # e.g. a message that can't be forwarded (protected content): copy it instead
+                        log.warning(f"[fwd {b_idx}] forward failed ({e}); falling back to download→upload")
+                        got = await _download(b_idx, batch)
+                        if got:
+                            await send_media(user_client, dest_entity, [p for _, p in got], pick_caption(batch), thread_id)
+                            delivered = [m for m, _ in got]
+                elif got:
+                    await send_media(user_client, dest_entity, [p for _, p in got], pick_caption(batch), thread_id)
+                    delivered = [m for m, _ in got]
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # incl. a FloodWait that outlasted all retries
+                log.error(f"[{'fwd' if use_forward else 'up'} {b_idx}] ✗ {e}")
+            finally:
+                turns[b_idx].set()  # always release the next batch, even if this one failed
+                for _, p in got: Path(p).unlink(missing_ok=True)
 
-    await asyncio.gather(*[process_batch(i, b) for i, b in enumerate(batches, 1)])
-    
-    # persist all sent IDs in one write
-    await db.save_sent()
+            # Only what was really delivered is marked as sent; the rest counts as failed
+            # (and is picked up again on the next run).
+            async with lock:
+                if delivered: db.mark_sent_sync(src_key, {m.id for m in delivered})
+                counters["success"] += len(delivered)
+                counters["failed"] += len(batch) - len(delivered)
+                counters["done"] += 1
+            await _update_progress()
+            await asyncio.sleep(SEND_DELAY / PARALLEL_WORKERS)
 
-    if not use_forward: shutil.rmtree(job_dir, ignore_errors=True)
-    
+    try:
+        await asyncio.gather(*[process_batch(i, b) for i, b in enumerate(batches, 1)])
+    finally:
+        # Runs on success, /cancel and errors alike, so already-sent IDs are never forgotten
+        # (otherwise a cancelled job re-sends everything next time).
+        await db.save_sent()
+        shutil.rmtree(job_dir, ignore_errors=True)
+
     await status_cb(
         f"✅ Clone complete!\n• Source: **{title}**\n• Mode: {mode_label}\n• Topic: `{thread_id}`\n"
         f"• Success: {counters['success']}/{total_files} files\n• Failed: {counters['failed']}/{total_files} files"
+        + (f"\n⚠️ Stopped at the MAX_SCAN_MESSAGES limit ({MAX_SCAN_MESSAGES} files per run) — send the same source again to continue" if limit_hit else "")
     )
 
 
@@ -246,9 +260,12 @@ async def clone_single_message(chat: str | int, msg_id: int, status_cb: StatusCb
     
     if use_forward:
         try:
-            await forward_to_topic(chat_entity, dest_entity, [m.id for m in batch], thread_id)
+            await retry_flood(
+                lambda: forward_to_topic(chat_entity, dest_entity, [m.id for m in batch], thread_id),
+                "forward")
             actual_mode = "⚡ forward"
-        except Exception:
+        except Exception as e:
+            log.warning(f"single message: forward failed ({e}); falling back to download→upload")
             use_forward = False
 
     if not use_forward:
@@ -259,14 +276,13 @@ async def clone_single_message(chat: str | int, msg_id: int, status_cb: StatusCb
             for m in batch:
                 p = await user_client.download_media(m, file=str(job_dir) + "/")
                 if p: paths.append(p)
-            caption = batch[-1].text or ""
-            if len(paths) == 1:
-                await user_client.send_file(dest_entity, file=paths[0], caption=caption, reply_to=thread_id, parse_mode="md")
-            elif len(paths) > 1:
-                captions = [caption] + [""] * (len(paths) - 1)
-                await user_client.send_file(dest_entity, file=paths, caption=captions, reply_to=thread_id, parse_mode="md")
+            if not paths:
+                await status_cb("❌ Could not download the media")
+                return
+            await send_media(user_client, dest_entity, paths, pick_caption(batch), thread_id)
             actual_mode = "📥 upload"
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)
 
+    await db.mark_sent(str(chat_entity.id), {m.id for m in batch})  # so a later group clone doesn't send it again
     await status_cb(f"✅ Sent successfully!\n• Chat: **{chat_title}**\n• Files: {len(batch)}\n• Mode: {actual_mode}")

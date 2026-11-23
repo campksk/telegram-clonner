@@ -9,7 +9,7 @@ from telethon import TelegramClient
 load_dotenv()
 
 BASE_DIR     = Path(__file__).parent
-SESSION_DIR  = BASE_DIR / "sessions"
+SESSION_DIR  = Path(os.getenv("SESSION_DIR", str(BASE_DIR / "sessions")))
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", str(BASE_DIR / "downloads")))
 
 SESSION_DIR.mkdir(exist_ok=True)
@@ -21,8 +21,16 @@ BOT_TOKEN     = os.getenv("BOT_TOKEN", "")
 DEST_GROUP_ID = int(os.getenv("DEST_GROUP_ID", "0"))
 SEND_DELAY    = float(os.getenv("SEND_DELAY", "1.5"))
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "3"))
+# Send in the original message order even with several workers (downloads still overlap).
+PRESERVE_ORDER = os.getenv("PRESERVE_ORDER", "1").strip().lower() not in ("0", "false", "no", "off")
 MAX_SCAN_MESSAGES = int(os.getenv("MAX_SCAN_MESSAGES", "10000"))
 ALLOWED_USERS = set(int(x.strip()) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip())
+
+
+def is_allowed(user_id) -> bool:
+    """Fail closed: with an empty ALLOWED_USER_IDS nobody is allowed (the bot drives your user account)."""
+    return user_id in ALLOWED_USERS
+
 
 logging.basicConfig(
     stream=sys.stdout,

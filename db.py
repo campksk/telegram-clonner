@@ -1,9 +1,9 @@
 import json
 import logging
-import asyncio
+import os
+import shutil
 from pathlib import Path
 
-import aiofiles
 
 log = logging.getLogger("clone-bot.db")
 
@@ -16,28 +16,81 @@ _sent_db: dict[str, set[int]] = {}
 _sent_urls: set[str] = set()
 
 
+def _read_sent(path: Path) -> dict[str, set[int]]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("expected a JSON object")
+    return {str(k): {int(i) for i in v} for k, v in raw.items()}
+
+
 def load_sent() -> None:
+    """Load the sent-message database.
+
+    If the main file exists but is unreadable it is set aside as '<name>.corrupt' (so it can never be
+    copied over the backup) and the last backup is used instead. A missing main file means 'start
+    fresh' - the backup is not used then, so deleting the file really does reset it.
+    """
     global _sent_db
+    _sent_db = {}
     if not SENT_DB_PATH.exists():
-        _sent_db = {}
         return
     try:
-        raw = json.loads(SENT_DB_PATH.read_text(encoding="utf-8"))
-        _sent_db = {k: set(v) for k, v in raw.items()}
+        _sent_db = _read_sent(SENT_DB_PATH)
         log.info(f"โหลด sent_db สำเร็จ ({sum(len(v) for v in _sent_db.values())} records)")
+        return
     except Exception as e:
-        log.warning(f"โหลด sent_db ล้มเหลว ใช้ค่าว่าง: {e}")
-        _sent_db = {}
+        log.error(f"{SENT_DB_PATH.name} is unreadable ({e})")
+
+    corrupt = SENT_DB_PATH.with_name(SENT_DB_PATH.name + ".corrupt")
+    try:
+        os.replace(SENT_DB_PATH, corrupt)
+        log.error(f"damaged file kept as {corrupt.name}")
+    except OSError as e:
+        log.error(f"could not move the damaged file aside: {e}")
+
+    if SENT_DB_BACKUP.exists():
+        try:
+            _sent_db = _read_sent(SENT_DB_BACKUP)
+            log.warning(f"restored sent_db from {SENT_DB_BACKUP.name} ({sum(len(v) for v in _sent_db.values())} records); "
+                        "the last few messages sent before the damage may be sent again")
+            return
+        except Exception as e:
+            log.error(f"{SENT_DB_BACKUP.name} is unreadable too ({e})")
+    log.error("starting with an empty sent_db")
+    _sent_db = {}
+
+
+def _write_atomic(path: Path, data: str) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(data, encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _refresh_backup() -> None:
+    """Keep the previous (known-good, because writes are atomic) file as the rolling backup."""
+    if not SENT_DB_PATH.exists():
+        return
+    tmp = SENT_DB_BACKUP.with_name(SENT_DB_BACKUP.name + ".tmp")
+    try:
+        shutil.copyfile(SENT_DB_PATH, tmp)
+        os.replace(tmp, SENT_DB_BACKUP)
+    except Exception as e:
+        tmp.unlink(missing_ok=True)
+        log.warning(f"could not refresh {SENT_DB_BACKUP.name}: {e}")
 
 
 async def save_sent() -> None:
-    # backup before overwrite
-    if SENT_DB_PATH.exists() and not SENT_DB_BACKUP.exists():
-        SENT_DB_BACKUP.write_text(SENT_DB_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    _refresh_backup()
     try:
         data = json.dumps({k: list(v) for k, v in _sent_db.items()}, ensure_ascii=False)
-        async with aiofiles.open(SENT_DB_PATH, "w", encoding="utf-8") as f:
-            await f.write(data)
+        # Written synchronously on purpose: there is no await between serialising and replacing
+        # the file, so concurrent jobs can never interleave writes, and a crash mid-write
+        # leaves the previous file intact (write to a temp file, then atomic replace).
+        _write_atomic(SENT_DB_PATH, data)
     except Exception as e:
         log.error(f"บันทึก sent_db ล้มเหลว: {e}")
 
@@ -86,8 +139,7 @@ async def mark_url_sent(url: str) -> None:
     _sent_urls.add(url)
     try:
         data = json.dumps({"urls": sorted(_sent_urls)}, ensure_ascii=False)
-        async with aiofiles.open(URLS_DB_PATH, "w", encoding="utf-8") as f:
-            await f.write(data)
+        _write_atomic(URLS_DB_PATH, data)
     except Exception as e:
         log.error(f"บันทึก sent_urls ล้มเหลว: {e}")
 
@@ -104,13 +156,21 @@ def load_pending_jobs() -> list[dict]:
 
 
 def save_pending_jobs(jobs: list[dict]) -> None:
-    JOBS_DB_PATH.write_text(json.dumps(jobs, ensure_ascii=False), encoding="utf-8")
+    _write_atomic(JOBS_DB_PATH, json.dumps(jobs, ensure_ascii=False))
 
 
-def add_pending_job(source_arg: str) -> None:
+def add_pending_job(source_arg: str, ref=None) -> None:
+    """Remember a running group clone so it can resume after a restart.
+
+    `source_arg` is the key (what the user typed); `ref` is the parsed source (int ID or username),
+    stored so resume doesn't have to re-parse text such as a private t.me/c/ link.
+    """
     jobs = load_pending_jobs()
     if not any(str(j.get("source")) == str(source_arg) for j in jobs):
-        jobs.append({"source": source_arg})
+        job = {"source": source_arg}
+        if ref is not None:
+            job["ref"] = ref
+        jobs.append(job)
         save_pending_jobs(jobs)
 
 

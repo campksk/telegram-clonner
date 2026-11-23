@@ -1,50 +1,89 @@
 # tg-clone-bot
 
-บอท Telegram ทูโคลน Media จากกลุ่่ม/ช่อง และดาวนโหลดจาก X/Instagram/TikTok สู่กลุ่่มปลายทาง
+บอท Telegram สำหรับโคลนสื่อ (รูป วิดีโอ ไฟล์) จากกลุ่มหรือช่อง รวมถึงดาวน์โหลดจาก X, Instagram และ TikTok แล้วส่งไปยังกลุ่มปลายทาง โดยแยกเป็น Topic ตามต้นทาง
 
-## Setup
+## การติดตั้ง
 
 ```bash
-./setup.sh
+cp .env.example .env   # แล้วแก้ค่าใน .env ให้ครบ
+./setup.sh             # สร้าง venv และติดตั้งแพ็กเกจ
+./run.sh               # เริ่มบอท
 ```
 
-## Configuration (.env)
+ครั้งแรกที่รัน บอทจะถามเบอร์โทรและรหัสยืนยันของ user account ในเทอร์มินัล เพื่อสร้าง session (เก็บไว้ในโฟลเดอร์ `sessions/`)
 
-| Variable | Description |
-|----------|-------------|
-| API_ID | Telegram API ID |
+บอทใช้ user account ของคุณในการอ่านและคัดลอกสื่อ ส่วน Bot Token ใช้รับคำสั่งจากคุณ
+
+## การตั้งค่า (.env)
+
+| ตัวแปร | คำอธิบาย |
+|--------|----------|
+| API_ID | Telegram API ID (ขอได้ที่ https://my.telegram.org) |
 | API_HASH | Telegram API Hash |
-| BOT_TOKEN | Bot Token (from @BotFather) |
-| DEST_GROUP_ID | กลุ่่ม/ช่องปลายทาง (admin + Topics) |
-| ALLOWED_USER_IDS | ID ผู้ใช้ที่มีสิทธิ (คั่่นดวย ,) |
-| SEND_DELAY | ความล่าชั่้าระหว่่างส่่ง (sec) |
-| PARALLEL_WORKERS | จำนวน worker ซ้อนกั่่น |
-| MAX_SCAN_MESSAGES | ขีดจำกัดสแกน message (default: 10000) |
-| DOWNLOAD_DIR | โฟลเดอร์ดาวนโหลดชั่่วคราว |
+| BOT_TOKEN | โทเค็นของบอท (จาก @BotFather) |
+| DEST_GROUP_ID | ID กลุ่มปลายทาง (user account ต้องเป็นแอดมิน และกลุ่มต้องเปิดใช้ Topics) |
+| ALLOWED_USER_IDS | **จำเป็น** — ID ผู้ใช้ที่มีสิทธิ์สั่งบอท คั่นด้วย `,` ถ้าว่างบอทจะไม่เริ่มทำงาน |
+| SEND_DELAY | ระยะเวลาหน่วงระหว่างการส่ง (วินาที) ค่าเริ่มต้น 1.5 |
+| PARALLEL_WORKERS | จำนวน worker ที่ทำงานพร้อมกัน ค่าเริ่มต้น 3 |
+| PRESERVE_ORDER | `1` = ส่งตามลำดับข้อความเดิมเสมอ (ค่าเริ่มต้น) · `0` = เร็วกว่า แต่ลำดับอาจสลับ (โดยเฉพาะโหมด forward) |
+| MAX_SCAN_MESSAGES | จำนวนสื่อใหม่สูงสุดต่อการรัน 1 ครั้ง (ค่าเริ่มต้น 10000) ส่งลิงก์เดิมซ้ำเพื่อทำต่อ |
+| DOWNLOAD_DIR | โฟลเดอร์ดาวน์โหลดชั่วคราว |
+| SESSION_DIR | โฟลเดอร์เก็บ session (ค่าเริ่มต้น `./sessions`) |
 
 ## Cookies
 
-| ไฟล์ | วัตถุประสงค้ |
-|------|------------|
-| cookies_ig.txt | Instagram (บังคับ) |
-| cookies_x.txt | X/Twitter (สำหร่ับ Private) |
-| cookies_tiktok.txt | TikTok (ถ้้าโดนบล็อดก) |
+วางไฟล์ไว้ในโฟลเดอร์หลักของบอท:
 
-Export: ใช้ extension [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/cclelndahbckbenkjhdbglgdgul_fromc) ใน Chrome → login → Save
+| ไฟล์ | ใช้สำหรับ |
+|------|-----------|
+| cookies_ig.txt | Instagram (จำเป็น) |
+| cookies_x.txt | X/Twitter (สำหรับบัญชี private) |
+| cookies_tiktok.txt | TikTok (ใช้เมื่อถูกบล็อก) |
 
-## Usage
+วิธี export: ติดตั้งส่วนขยาย [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) ใน Chrome → ล็อกอินเว็บนั้น → export แล้วบันทึกเป็นชื่อไฟล์ตามตาราง
 
-สั่่งลื่อก/ข้้อนความเข้้าบอท (private chat เท่่านั้่น):
+ไฟล์ cookies ให้สิทธิ์เข้าบัญชีของคุณ อย่าแชร์หรือ commit (`.gitignore` กันไว้ให้แล้ว)
 
-| สั่่ง | ตั่ัวอย่่าง |
-|------|---------|
-| Clone group | `https://t.me/username` หรืือ `123456789` |
-| Clone private | `https://t.me/c/12345/67890` |
-| Single msg | `https://t.me/username/12345` |
+## วิธีใช้
+
+ส่งลิงก์หรือข้อความถึงบอทใน private chat เท่านั้น และเฉพาะผู้ใช้ที่อยู่ใน `ALLOWED_USER_IDS`:
+
+| ต้องการ | ตัวอย่าง |
+|---------|----------|
+| โคลนทั้งกลุ่ม/ช่อง | `https://t.me/username` · `username` · `-1001234567890` |
+| โคลนกลุ่ม/ช่องส่วนตัว | `https://t.me/c/1234567890` (user account ต้องเป็นสมาชิก) |
+| โคลนข้อความเดียว | `https://t.me/username/12345` · `https://t.me/c/1234567890/12345` |
 | X/Twitter | `https://x.com/user/status/123...` |
-| Instagram | `https://instagram.com/p/xxxxx` |
+| Instagram | โพสต์ รีล หรือสตอรี่ เช่น `https://instagram.com/reel/xxxxx` (ลิงก์ `/p/` `/reels/` `/share/` และ `/<username>/reel/` ใช้ได้ทั้งหมด ต้องมี `cookies_ig.txt` และไม่รองรับหน้าโปรไฟล์) |
 | TikTok | `https://tiktok.com/@user/video/123...` |
-| Cancel | `/cancel` หรืือ `/cancel <source>` |
-| Jobs | `/jobs` |
-| Status | `/ping` |
-วางลิงก์ปุ๊บ บอทโคลนให้อัตโนมัติ! โครงสร้างใหม่แบบ Clean Architecture ดูแลรักษาง่ายกว่าเดิม
+| ส่งซ้ำลิงก์ที่เคยส่งแล้ว | `force https://x.com/user/status/123...` |
+| ยกเลิกงาน | `/cancel` (ทั้งหมด) หรือ `/cancel <ชื่องานที่แสดงใน /jobs>` |
+| ดูงานที่กำลังทำ | `/jobs` |
+| ตรวจสอบสถานะเครื่อง | `/ping` |
+
+ถ้าวางข้อความที่มีลิงก์ปนอยู่ บอทจะใช้ลิงก์แรกที่พบ
+
+## การทำงาน
+
+- ต้นทางที่ส่งต่อได้จะใช้โหมด forward ส่วนต้นทางที่ห้ามส่งต่อ (และแชทกับผู้ใช้) จะดาวน์โหลดแล้วอัปโหลดใหม่ ถ้า forward ข้อความใดไม่สำเร็จ บอทจะลองคัดลอกด้วยวิธีดาวน์โหลดแทน
+- ข้อความที่ส่งแล้วถูกจำไว้ใน `sent_media.json` (สำรองอัตโนมัติเป็น `.bak`) การรันซ้ำจึงข้ามของเดิม ลบไฟล์นี้หากต้องการเริ่มใหม่
+- งานโคลนกลุ่มที่ค้างอยู่ตอนปิดบอทจะทำต่อเองเมื่อเปิดใหม่ (งานที่สั่ง `/cancel` จะไม่ทำต่อ) งานลิงก์เดี่ยวและ X/Instagram/TikTok ไม่ทำต่อ
+- เมื่อโดน FloodWait บอทจะรอตามเวลาที่ Telegram กำหนดแล้วลองใหม่ให้อัตโนมัติ
+
+## โครงสร้างโปรเจกต์
+
+| ไฟล์ | หน้าที่ |
+|------|---------|
+| `main.py` | จุดเริ่มต้น ล็อกอิน และ resume งานที่ค้าง |
+| `handlers/` | รับข้อความและคำสั่งจากผู้ใช้ |
+| `jobs.py` | จัดการงานเบื้องหลัง (ติดตาม ยกเลิก แจ้ง error) |
+| `parsing.py` | แยกลิงก์และข้อความที่ผู้ใช้ส่งมา |
+| `worker/` | การโคลน การส่งสื่อ Topic และตัวดาวน์โหลด gallery-dl |
+| `db.py` | บันทึกข้อความที่ส่งแล้ว งานที่ค้าง และลิงก์ที่ส่งแล้ว |
+
+## การทดสอบ
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
