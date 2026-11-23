@@ -13,13 +13,15 @@ except ImportError:
 from telethon.tl.types import User as TLUser
 
 import db
-from config import DEST_GROUP_ID, DOWNLOAD_DIR, SEND_DELAY, PARALLEL_WORKERS, MAX_SCAN_MESSAGES, user_client
+from config import DEST_GROUP_ID, DOWNLOAD_DIR, SEND_DELAY, PARALLEL_WORKERS, PRESERVE_ORDER, MAX_SCAN_MESSAGES, user_client
 
 from worker.utils import _flood_seconds, is_supported_media, is_public_entity
 from worker.sender import pick_caption, send_media
 from worker.topics import get_or_create_topic, forward_to_topic
 
 log = logging.getLogger("clone-bot.worker.clone")
+
+DOWNLOAD_RETRY_DELAY = 2  # seconds, multiplied by the attempt number
 StatusCb = Callable[[str], Awaitable[None]]
 
 
@@ -124,63 +126,62 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
     job_dir = DOWNLOAD_DIR / src_key
     if not use_forward: job_dir.mkdir(parents=True, exist_ok=True)
 
+    # Batches are downloaded/prepared in parallel but SENT in message order (when PRESERVE_ORDER):
+    # batch i may only send after batch i-1 has finished its send step. Each batch holds its
+    # semaphore slot until it has sent, and slots are handed out in batch order, so the oldest
+    # unsent batch always has a slot and this cannot deadlock.
+    turns = [asyncio.Event() for _ in range(len(batches) + 1)]
+    turns[0].set()
+
+    async def _download(b_idx, batch):
+        """Download a batch. Returns [(message, path)] for the files that arrived."""
+        got = []
+        for msg in batch:
+            for attempt in range(3):
+                try:
+                    p = await user_client.download_media(msg, file=str(job_dir) + "/")
+                    if p: got.append((msg, p))
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        log.warning(f"[up {b_idx}] skip msg {msg.id}: {e}")
+                    else:
+                        await asyncio.sleep(DOWNLOAD_RETRY_DELAY * (attempt + 1))
+        return got
+
     async def process_batch(b_idx, batch):
-        if use_forward:
-            async with sem:
-                try:
-                    msg_ids = [m.id for m in batch]
-                    await forward_to_topic(source_entity, dest_entity, msg_ids, thread_id)
-                    async with lock:
-                        counters["success"] += len(batch)
-                        db.mark_sent_sync(src_key, set(msg_ids))
-                except (FloodWaitError, FloodPremiumWaitError) as e:
-                    wait_s = _flood_seconds(e)
-                    await asyncio.sleep(wait_s + 2)
-                    async with lock: counters["failed"] += len(batch)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    log.error(f"[fwd {b_idx}] ✗ {e}")
-                    async with lock: counters["failed"] += len(batch)
-                finally:
-                    async with lock: counters["done"] += 1
-                    await _update_progress()
-                    await asyncio.sleep(SEND_DELAY / PARALLEL_WORKERS)
-        else:
-            paths = []
-            async with sem:
-                try:
-                    for msg in batch:
-                        for attempt in range(3):
-                            try:
-                                p = await user_client.download_media(msg, file=str(job_dir) + "/")
-                                if p: paths.append(p)
-                                break
-                            except Exception as e:
-                                if attempt == 2:
-                                    log.warning(f"[up {b_idx}] skip msg {msg.id}: {e}")
-                                else:
-                                    await asyncio.sleep(2 * (attempt + 1))
-                    if not paths:
-                        return
-                    await send_media(user_client, dest_entity, paths, pick_caption(batch), thread_id)
-                    async with lock:
-                        counters["success"] += len(batch)
-                        db.mark_sent_sync(src_key, {m.id for m in batch})
-                except (FloodWaitError, FloodPremiumWaitError) as e:
-                    wait_s = _flood_seconds(e)
-                    await asyncio.sleep(wait_s + 2)
-                    async with lock: counters["failed"] += len(batch)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    log.error(f"[up {b_idx}] ✗ {e}")
-                    async with lock: counters["failed"] += len(batch)
-                finally:
-                    for p in paths: Path(p).unlink(missing_ok=True)
-                    async with lock: counters["done"] += 1
-                    await _update_progress()
-                    await asyncio.sleep(SEND_DELAY / PARALLEL_WORKERS)
+        got, delivered = [], []
+        async with sem:
+            if not use_forward:
+                got = await _download(b_idx, batch)
+            if PRESERVE_ORDER:
+                await turns[b_idx - 1].wait()
+            try:
+                if use_forward:
+                    await forward_to_topic(source_entity, dest_entity, [m.id for m in batch], thread_id)
+                    delivered = list(batch)
+                elif got:
+                    await send_media(user_client, dest_entity, [p for _, p in got], pick_caption(batch), thread_id)
+                    delivered = [m for m, _ in got]
+            except (FloodWaitError, FloodPremiumWaitError) as e:
+                await asyncio.sleep(_flood_seconds(e) + 2)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.error(f"[{'fwd' if use_forward else 'up'} {b_idx}] ✗ {e}")
+            finally:
+                turns[b_idx].set()  # always release the next batch, even if this one failed
+                for _, p in got: Path(p).unlink(missing_ok=True)
+
+            # Only what was really delivered is marked as sent; the rest counts as failed
+            # (and is picked up again on the next run).
+            async with lock:
+                if delivered: db.mark_sent_sync(src_key, {m.id for m in delivered})
+                counters["success"] += len(delivered)
+                counters["failed"] += len(batch) - len(delivered)
+                counters["done"] += 1
+            await _update_progress()
+            await asyncio.sleep(SEND_DELAY / PARALLEL_WORKERS)
 
     try:
         await asyncio.gather(*[process_batch(i, b) for i, b in enumerate(batches, 1)])

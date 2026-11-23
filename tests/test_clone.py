@@ -19,6 +19,9 @@ class FakeClient:
         self.messages = messages
         self.noforwards = noforwards
         self.sent = []          # ("file", file, caption) / ("msg", text)
+        self.download_delay = {}
+        self.fail_download = set()
+        self.active = self.max_active = 0
 
     async def get_entity(self, ref):
         if ref == clone.DEST_GROUP_ID:
@@ -26,6 +29,14 @@ class FakeClient:
         return types.SimpleNamespace(id=42, title="Src", noforwards=self.noforwards)
 
     async def download_media(self, msg, file=None):
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            await asyncio.sleep(self.download_delay.get(msg.id, 0))
+            if msg.id in self.fail_download:
+                raise RuntimeError("download failed")
+        finally:
+            self.active -= 1
         path = f"{file}{msg.id}.jpg"
         with open(path, "wb") as f:
             f.write(b"x")
@@ -57,6 +68,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(clone, "SEND_DELAY", 0)
     monkeypatch.setattr(clone, "PARALLEL_WORKERS", 1)
     monkeypatch.setattr(clone, "MAX_SCAN_MESSAGES", 10_000)
+    monkeypatch.setattr(clone, "DOWNLOAD_RETRY_DELAY", 0)
 
     async def topic(title):
         return 7
@@ -169,3 +181,107 @@ def test_oversized_caption_does_not_fail_the_upload(env, monkeypatch):
     asyncio.run(clone.clone_group("src", noop))
     assert client.sent == [("file", "1.jpg", ""), ("msg", big)]
     assert db.get_sent("42") == {1}
+
+
+# ---------- ordering with several workers ----------
+
+def _forward_with_delays(done, delays):
+    async def fwd(src, dest, ids, thread_id):
+        await asyncio.sleep(delays.get(ids[0], 0))
+        done.append(ids[0])
+    return fwd
+
+
+def test_forward_keeps_message_order_with_parallel_workers(env, monkeypatch):
+    monkeypatch.setattr(clone, "PARALLEL_WORKERS", 3)
+    monkeypatch.setattr(clone, "PRESERVE_ORDER", True)
+    done = []
+    # earlier messages are the slowest: without ordering they would finish last
+    monkeypatch.setattr(clone, "forward_to_topic", _forward_with_delays(done, {1: 0.12, 2: 0.08, 3: 0.04}))
+    use_messages(monkeypatch, [make_msg(i) for i in range(1, 7)])
+    asyncio.run(asyncio.wait_for(clone.clone_group("src", noop), 10))
+    assert done == [1, 2, 3, 4, 5, 6]
+
+
+def test_order_can_be_switched_off_for_speed(env, monkeypatch):
+    monkeypatch.setattr(clone, "PARALLEL_WORKERS", 3)
+    monkeypatch.setattr(clone, "PRESERVE_ORDER", False)
+    done = []
+    monkeypatch.setattr(clone, "forward_to_topic", _forward_with_delays(done, {1: 0.12, 2: 0.08, 3: 0.04}))
+    use_messages(monkeypatch, [make_msg(i) for i in range(1, 4)])
+    asyncio.run(asyncio.wait_for(clone.clone_group("src", noop), 10))
+    assert done == [3, 2, 1] and db.get_sent("42") == {1, 2, 3}
+
+
+def test_upload_downloads_overlap_but_sends_stay_in_order(env, monkeypatch):
+    monkeypatch.setattr(clone, "DOWNLOAD_DIR", env)
+    monkeypatch.setattr(clone, "PARALLEL_WORKERS", 3)
+    monkeypatch.setattr(clone, "PRESERVE_ORDER", True)
+    client = FakeClient([make_msg(i) for i in range(1, 7)], noforwards=True)
+    client.download_delay = {1: 0.15, 2: 0.10, 3: 0.05}
+    monkeypatch.setattr(clone, "user_client", client)
+    asyncio.run(asyncio.wait_for(clone.clone_group("src", noop), 10))
+    assert [c[1] for c in client.sent] == [f"{i}.jpg" for i in range(1, 7)]
+    assert client.max_active >= 2                         # still downloading in parallel
+
+
+def test_a_failed_batch_does_not_block_the_ones_after_it(env, monkeypatch):
+    monkeypatch.setattr(clone, "PARALLEL_WORKERS", 2)
+    done = []
+
+    async def fwd(src, dest, ids, thread_id):
+        if ids == [2]:
+            raise RuntimeError("forward refused")
+        done.append(ids[0])
+
+    monkeypatch.setattr(clone, "forward_to_topic", fwd)
+    use_messages(monkeypatch, [make_msg(i) for i in range(1, 6)])
+    statuses = []
+
+    async def status(t):
+        statuses.append(t)
+
+    asyncio.run(asyncio.wait_for(clone.clone_group("src", status), 10))   # must not hang
+    assert done == [1, 3, 4, 5]
+    assert db.get_sent("42") == {1, 3, 4, 5}                              # 2 stays unsent -> retried next run
+    assert "Failed: 1/5" in statuses[-1]
+
+
+# ---------- accurate accounting ----------
+
+def test_partial_album_marks_only_what_was_sent(env, monkeypatch):
+    monkeypatch.setattr(clone, "DOWNLOAD_DIR", env)
+    client = FakeClient([make_msg(1, grouped=9, text="cap"), make_msg(2, grouped=9), make_msg(3, grouped=9)], noforwards=True)
+    client.fail_download = {2}
+    monkeypatch.setattr(clone, "user_client", client)
+    statuses = []
+
+    async def status(t):
+        statuses.append(t)
+
+    asyncio.run(clone.clone_group("src", status))
+    assert client.sent == [("file", ["1.jpg", "3.jpg"], ["cap", ""])]
+    assert db.get_sent("42") == {1, 3}                    # 2 used to be marked as sent although it never was
+    assert "Success: 2/3" in statuses[-1] and "Failed: 1/3" in statuses[-1]
+
+    client.sent.clear()
+    client.fail_download = set()
+    asyncio.run(clone.clone_group("src", noop))           # next run sends only the missing one
+    assert client.sent == [("file", "2.jpg", "")]
+    assert db.get_sent("42") == {1, 2, 3}
+
+
+def test_batch_where_every_download_fails_counts_as_failed(env, monkeypatch):
+    monkeypatch.setattr(clone, "DOWNLOAD_DIR", env)
+    client = FakeClient([make_msg(1), make_msg(2)], noforwards=True)
+    client.fail_download = {1, 2}
+    monkeypatch.setattr(clone, "user_client", client)
+    statuses = []
+
+    async def status(t):
+        statuses.append(t)
+
+    asyncio.run(clone.clone_group("src", status))
+    assert client.sent == []
+    assert "Success: 0/2" in statuses[-1] and "Failed: 2/2" in statuses[-1]   # used to show neither
+    assert db.get_sent("42") == set()
