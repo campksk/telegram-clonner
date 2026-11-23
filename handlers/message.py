@@ -8,13 +8,13 @@ import jobs
 import worker
 from config import bot_client, is_allowed
 from parsing import (
-    MESSAGE_PATTERN, extract_target, normalize_url, parse_source, parse_tg_link, wants_force,
+    IG_POST_RE, MESSAGE_PATTERN, canonical_instagram, extract_target, is_instagram, normalize_url,
+    parse_source, parse_tg_link, wants_force,
 )
 
 log = logging.getLogger("clone-bot.message")
 
 X_RE = re.compile(r"https?://(?:www\.)?(?:twitter\.com|x\.com)/([^/]+)/status/(\d+)")
-IG_RE = re.compile(r"https?://(?:www\.)?instagram\.com/(?:p|reel|tv|stories)/([^/?#&]+)")
 TIKTOK_RE = re.compile(r"https?://(?:www\.|vm\.|vt\.)?tiktok\.com/\S+")
 
 
@@ -23,7 +23,7 @@ def _site_job(arg: str):
     m = X_RE.search(arg)
     if m:
         return f"x_{m.group(2)}", "X", worker.clone_x_media
-    m = IG_RE.search(arg)
+    m = IG_POST_RE.search(arg)
     if m:
         return f"ig_{m.group(1)}", "Instagram", worker.clone_ig_media
     if TIKTOK_RE.search(arg):
@@ -46,6 +46,8 @@ async def handle_message(event: events.NewMessage.Event):
     raw = event.pattern_match.group(1) or ""
     arg = extract_target(raw)
     if not arg: return
+    if is_instagram(arg):
+        arg = canonical_instagram(arg)
 
     status_msg = await event.reply(f"🚀 กำลังประมวลผล `{arg}`...")
     async def status_cb(text: str):
@@ -80,6 +82,11 @@ async def handle_message(event: events.NewMessage.Event):
             await db.mark_url_sent(norm)
 
         jobs.start_job(key, f"{label} download", clone(arg, status_cb), status_cb, on_success=mark_sent)
+        return
+
+    # --- an Instagram link we can't download (profile, explore, ...) ---
+    if is_instagram(arg):
+        await status_cb(f"⚠️ Instagram link not supported: `{arg}`\nSend a link to a post, reel or story (profile pages aren't supported)")
         return
 
     # --- whole group / channel / user ---

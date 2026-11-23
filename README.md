@@ -54,7 +54,7 @@ cp .env.example .env   # แล้วแก้ค่าใน .env ให้ค�
 | โคลนกลุ่ม/ช่องส่วนตัว | `https://t.me/c/1234567890` (user account ต้องเป็นสมาชิก) |
 | โคลนข้อความเดียว | `https://t.me/username/12345` · `https://t.me/c/1234567890/12345` |
 | X/Twitter | `https://x.com/user/status/123...` |
-| Instagram | `https://instagram.com/p/xxxxx` |
+| Instagram | โพสต์ รีล หรือสตอรี่ เช่น `https://instagram.com/reel/xxxxx` (ลิงก์ `/p/` `/reels/` `/share/` และ `/<username>/reel/` ใช้ได้ทั้งหมด ต้องมี `cookies_ig.txt` และไม่รองรับหน้าโปรไฟล์) |
 | TikTok | `https://tiktok.com/@user/video/123...` |
 | ส่งซ้ำลิงก์ที่เคยส่งแล้ว | `force https://x.com/user/status/123...` |
 | ยกเลิกงาน | `/cancel` (ทั้งหมด) หรือ `/cancel <ชื่องานที่แสดงใน /jobs>` |

@@ -1,6 +1,7 @@
 import pytest
 
-from parsing import MESSAGE_PATTERN, extract_target, normalize_url, parse_source, parse_tg_link, wants_force
+from parsing import (IG_POST_RE, MESSAGE_PATTERN, canonical_instagram, extract_target, is_instagram, normalize_url,
+                     parse_source, parse_tg_link, wants_force)
 
 
 @pytest.mark.parametrize("url,expected", [
@@ -86,3 +87,68 @@ def test_normalize_url_keeps_different_posts_apart():
 ])
 def test_wants_force(text, expected):
     assert wants_force(text) is expected
+
+
+# ---------- Instagram link shapes ----------
+
+IG_SHAPES = [
+    ("https://www.instagram.com/p/CxAbCdEfGhI/", "CxAbCdEfGhI"),
+    ("https://www.instagram.com/reel/CxAbCdEfGhI/", "CxAbCdEfGhI"),
+    ("https://www.instagram.com/reels/CxAbCdEfGhI/", "CxAbCdEfGhI"),               # plural
+    ("https://www.instagram.com/tv/CxAbCdEfGhI/", "CxAbCdEfGhI"),
+    ("https://www.instagram.com/someuser/reel/CxAbCdEfGhI/", "CxAbCdEfGhI"),       # newer links carry the username
+    ("https://www.instagram.com/someuser/p/CxAbCdEfGhI/", "CxAbCdEfGhI"),
+    ("https://www.instagram.com/share/reel/BAbCdEfGhI/", "BAbCdEfGhI"),             # "share" links
+    ("https://www.instagram.com/share/p/BAbCdEfGhI/", "BAbCdEfGhI"),
+    ("https://www.instagram.com/share/BAbCdEfGhI", "BAbCdEfGhI"),
+    ("https://www.instagram.com/stories/someuser/3123456789012345678/", "someuser"),
+    ("https://www.instagram.com/stories/highlights/17900000000000000/", "highlights"),
+    ("https://instagram.com/reel/CxAbCdEfGhI/?igsh=MWJ4eXo", "CxAbCdEfGhI"),
+]
+
+
+@pytest.mark.parametrize("url,code", IG_SHAPES)
+def test_instagram_post_links_are_recognised(url, code):
+    m = IG_POST_RE.search(url)
+    assert m and m.group(1) == code
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.instagram.com/someuser/",          # profile
+    "https://www.instagram.com/someuser",
+    "https://www.instagram.com/",
+    "https://www.instagram.com/explore/tags/cats/",
+    "https://www.instagram.com/share/",
+    "https://example.com/p/CxAbCdEfGhI/",
+])
+def test_other_instagram_urls_are_not_posts(url):
+    assert IG_POST_RE.search(url) is None
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://m.instagram.com/p/CxAb/", "https://www.instagram.com/p/CxAb/"),
+    ("https://instagram.com/p/CxAb/", "https://www.instagram.com/p/CxAb/"),
+    ("http://instagr.am/p/CxAb/", "https://www.instagram.com/p/CxAb/"),
+    ("https://www.instagram.com/p/CxAb/", "https://www.instagram.com/p/CxAb/"),
+])
+def test_canonical_instagram(url, expected):
+    assert is_instagram(url) and canonical_instagram(url) == expected
+
+
+def test_is_instagram_does_not_match_lookalikes():
+    assert not is_instagram("https://notinstagram.com/p/x/")
+    assert not is_instagram("https://instagram.com.evil.example/p/x/")
+    assert not is_instagram("https://x.com/a/status/1")
+
+
+def test_one_instagram_post_has_one_dedup_key_whatever_the_link_style():
+    keys = {normalize_url(u) for u in [
+        "https://www.instagram.com/p/CxAb/?igsh=1",
+        "https://www.instagram.com/reel/CxAb/",
+        "https://www.instagram.com/reels/CxAb/",
+        "https://www.instagram.com/someuser/reel/CxAb/",
+        "https://instagr.am/p/CxAb",
+    ]}
+    assert keys == {"https://instagram.com/p/CxAb"}
+    assert normalize_url("https://www.instagram.com/p/CxAb/") != normalize_url("https://www.instagram.com/p/CxAc/")
+    assert normalize_url("https://www.instagram.com/stories/u/1/") == "https://instagram.com/stories/u/1"

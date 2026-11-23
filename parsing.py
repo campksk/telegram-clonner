@@ -16,6 +16,28 @@ _TG_LINK_RE = re.compile(
 )
 
 
+# Instagram post-like links (everything gallery-dl can download as one item):
+#   /p/<code>  /reel/<code>  /reels/<code>  /tv/<code>  /<user>/p|reel/<code>
+#   /share/<code>  /share/p|reel/<code>  /stories/<user>/<id>  /stories/highlights/<id>
+IG_POST_RE = re.compile(
+    r"https?://(?:www\.)?instagram\.com/"
+    r"(?:[^/?#]+/)?"
+    r"(?:p|reels?|tv|stories|share)/"
+    r"(?:(?:p|reels?|tv)/)?"
+    r"([^/?#&]+)"
+)
+_IG_HOST_RE = re.compile(r"^https?://(?:(?:www|m)\.)?(?:instagram\.com|instagr\.am)(?=[/?#]|$)", re.I)
+
+
+def is_instagram(url: str) -> bool:
+    return bool(_IG_HOST_RE.match(url))
+
+
+def canonical_instagram(url: str) -> str:
+    """m.instagram.com / instagr.am / no-www -> https://www.instagram.com (what gallery-dl understands)."""
+    return _IG_HOST_RE.sub("https://www.instagram.com", url, count=1)
+
+
 def extract_target(text: str) -> str:
     """Return the first URL in `text` (trailing punctuation removed).
 
@@ -69,6 +91,12 @@ def normalize_url(url: str) -> str:
         m = re.match(r"(/[^/]+/status/\d+)", path)
         if m:
             path = m.group(1)
+    if host in ("instagram.com", "instagr.am"):
+        host = "instagram.com"
+        # the same post can be linked as /p/, /reel/, /reels/, /tv/ or /<user>/reel/ - one shortcode
+        m = re.match(r"(?:/[^/]+)?/(?:p|reels?|tv)/([^/]+)", path)
+        if m:
+            path = f"/p/{m.group(1)}"
     return f"https://{host}{path}"
 
 

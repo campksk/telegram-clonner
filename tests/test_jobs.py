@@ -254,3 +254,84 @@ def test_resume_handles_legacy_and_unreadable_entries(monkeypatch):
     assert sorted(map(str, sources)) == ["-1001234", "durov"]
     assert sources.count(-1001234) == 1                      # legacy numeric string became an int
     assert "!!" not in [j["source"] for j in _pending()]     # unreadable entry dropped
+
+
+# ---------- Instagram links through the real handler ----------
+
+@pytest.mark.parametrize("sent,expected_url", [
+    ("https://www.instagram.com/reels/CxAb/", "https://www.instagram.com/reels/CxAb/"),
+    ("https://www.instagram.com/someuser/reel/CxAb/?igsh=1", "https://www.instagram.com/someuser/reel/CxAb/?igsh=1"),
+    ("https://www.instagram.com/share/reel/BAbCd/", "https://www.instagram.com/share/reel/BAbCd/"),
+    ("https://instagram.com/p/CxAb/", "https://www.instagram.com/p/CxAb/"),        # host normalised for gallery-dl
+    ("https://m.instagram.com/p/CxAb/", "https://www.instagram.com/p/CxAb/"),
+    ("http://instagr.am/p/CxAb/", "https://www.instagram.com/p/CxAb/"),
+    ("look at this\nhttps://www.instagram.com/reel/CxAb/\nwow", "https://www.instagram.com/reel/CxAb/"),
+])
+def test_instagram_links_are_downloaded(monkeypatch, sent, expected_url):
+    seen = []
+
+    async def fake_ig(url, status_cb):
+        seen.append(url)
+        return True
+
+    monkeypatch.setattr(message.worker, "clone_ig_media", fake_ig)
+
+    async def run():
+        ev = FakeEvent(sent)
+        await message.handle_message(ev)
+        await drain()
+        return ev
+
+    ev = asyncio.run(run())
+    assert seen == [expected_url]
+    assert not any("not recognized" in t or "not supported" in t for t in ev.texts)
+
+
+@pytest.mark.parametrize("sent", [
+    "https://www.instagram.com/someuser/",
+    "https://www.instagram.com/explore/tags/cats/",
+])
+def test_unsupported_instagram_links_get_a_clear_message(monkeypatch, sent):
+    called = []
+
+    async def fake_ig(url, status_cb):
+        called.append(url)
+        return True
+
+    monkeypatch.setattr(message.worker, "clone_ig_media", fake_ig)
+
+    async def run():
+        ev = FakeEvent(sent)
+        await message.handle_message(ev)
+        await drain()
+        return ev
+
+    ev = asyncio.run(run())
+    assert called == []
+    assert any("Instagram link not supported" in t and "post, reel or story" in t for t in ev.texts)
+    assert not any("not recognized" in t for t in ev.texts)         # the old, confusing message
+
+
+def test_same_post_in_another_link_style_counts_as_already_sent(monkeypatch):
+    seen = []
+
+    async def fake_ig(url, status_cb):
+        seen.append(url)
+        return True
+
+    monkeypatch.setattr(message.worker, "clone_ig_media", fake_ig)
+
+    async def send(text):
+        ev = FakeEvent(text)
+        await message.handle_message(ev)
+        await drain()
+        return ev
+
+    async def run():
+        await send("https://www.instagram.com/p/CxAb/")
+        ev = await send("https://www.instagram.com/reels/CxAb/?igsh=9")
+        assert any("Already sent" in t for t in ev.texts)
+        await send("force https://www.instagram.com/reel/CxAb/")
+
+    asyncio.run(run())
+    assert len(seen) == 2
