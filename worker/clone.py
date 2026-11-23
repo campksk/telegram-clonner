@@ -4,19 +4,22 @@ import shutil
 from pathlib import Path
 from typing import Callable, Awaitable
 
-from telethon.errors import ChatAdminRequiredError
+from telethon.errors import ChatAdminRequiredError, ChatWriteForbiddenError
 from telethon.tl.types import User as TLUser
 
 import db
 from config import DEST_GROUP_ID, DOWNLOAD_DIR, SEND_DELAY, PARALLEL_WORKERS, PRESERVE_ORDER, MAX_SCAN_MESSAGES, user_client
 
-from worker.utils import retry_flood, is_supported_media, is_public_entity
+from worker.utils import FLOOD_ERRORS, retry_flood, is_supported_media, is_public_entity
 from worker.sender import pick_caption, send_media
 from worker.topics import get_or_create_topic, forward_to_topic
 
 log = logging.getLogger("clone-bot.worker.clone")
 
 DOWNLOAD_RETRY_DELAY = 2  # seconds, multiplied by the attempt number
+
+# Forward errors where copying the media instead cannot help (flooding / no right to post in the destination)
+NO_FALLBACK = (*FLOOD_ERRORS, ChatAdminRequiredError, ChatWriteForbiddenError)
 StatusCb = Callable[[str], Awaitable[None]]
 
 
@@ -118,8 +121,7 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
                     f"(✓{counters['success']} ✗{counters['failed']})"
                 )
 
-    job_dir = DOWNLOAD_DIR / src_key
-    if not use_forward: job_dir.mkdir(parents=True, exist_ok=True)
+    job_dir = DOWNLOAD_DIR / src_key  # created on first download (forward mode may never need it)
 
     # Batches are downloaded/prepared in parallel but SENT in message order (when PRESERVE_ORDER):
     # batch i may only send after batch i-1 has finished its send step. Each batch holds its
@@ -130,6 +132,7 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
 
     async def _download(b_idx, batch):
         """Download a batch. Returns [(message, path)] for the files that arrived."""
+        job_dir.mkdir(parents=True, exist_ok=True)
         got = []
         for msg in batch:
             for attempt in range(3):
@@ -153,10 +156,20 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
                 await turns[b_idx - 1].wait()
             try:
                 if use_forward:
-                    await retry_flood(
-                        lambda: forward_to_topic(source_entity, dest_entity, [m.id for m in batch], thread_id),
-                        f"forward {b_idx}")
-                    delivered = list(batch)
+                    try:
+                        await retry_flood(
+                            lambda: forward_to_topic(source_entity, dest_entity, [m.id for m in batch], thread_id),
+                            f"forward {b_idx}")
+                        delivered = list(batch)
+                    except NO_FALLBACK:
+                        raise
+                    except Exception as e:
+                        # e.g. a message that can't be forwarded (protected content): copy it instead
+                        log.warning(f"[fwd {b_idx}] forward failed ({e}); falling back to download→upload")
+                        got = await _download(b_idx, batch)
+                        if got:
+                            await send_media(user_client, dest_entity, [p for _, p in got], pick_caption(batch), thread_id)
+                            delivered = [m for m, _ in got]
                 elif got:
                     await send_media(user_client, dest_entity, [p for _, p in got], pick_caption(batch), thread_id)
                     delivered = [m for m, _ in got]
@@ -184,7 +197,7 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
         # Runs on success, /cancel and errors alike, so already-sent IDs are never forgotten
         # (otherwise a cancelled job re-sends everything next time).
         await db.save_sent()
-        if not use_forward: shutil.rmtree(job_dir, ignore_errors=True)
+        shutil.rmtree(job_dir, ignore_errors=True)
 
     await status_cb(
         f"✅ Clone complete!\n• Source: **{title}**\n• Mode: {mode_label}\n• Topic: `{thread_id}`\n"

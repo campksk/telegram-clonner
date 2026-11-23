@@ -3,7 +3,7 @@ import json
 import types
 
 import pytest
-from telethon.errors import FloodWaitError
+from telethon.errors import ChatWriteForbiddenError, FloodWaitError
 
 import db
 from worker import clone
@@ -24,6 +24,7 @@ class FakeClient:
         self.fail_download = set()
         self.active = self.max_active = 0
         self.flood_send = 0     # number of upcoming send_file calls that answer FloodWait
+        self.downloads = []
 
     async def get_entity(self, ref):
         if ref == clone.DEST_GROUP_ID:
@@ -31,6 +32,7 @@ class FakeClient:
         return types.SimpleNamespace(id=42, title="Src", noforwards=self.noforwards)
 
     async def download_media(self, msg, file=None):
+        self.downloads.append(msg.id)
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         try:
@@ -240,7 +242,10 @@ def test_a_failed_batch_does_not_block_the_ones_after_it(env, monkeypatch):
         done.append(ids[0])
 
     monkeypatch.setattr(clone, "forward_to_topic", fwd)
-    use_messages(monkeypatch, [make_msg(i) for i in range(1, 6)])
+    monkeypatch.setattr(clone, "DOWNLOAD_DIR", env)
+    client = FakeClient([make_msg(i) for i in range(1, 6)])
+    client.fail_download = {2}                      # forward refused AND the fallback copy fails -> batch 2 really fails
+    monkeypatch.setattr(clone, "user_client", client)
     statuses = []
 
     async def status(t):
@@ -344,3 +349,75 @@ def test_flood_wait_on_upload_does_not_duplicate_the_media(env, monkeypatch, flo
     asyncio.run(clone.clone_group("src", noop))
     assert client.sent == [("file", "1.jpg", "cap")]    # sent exactly once after two waits
     assert flood_sleeps == [4, 4] and db.get_sent("42") == {1}
+
+
+# ---------- forward -> download/upload fallback ----------
+
+def test_message_that_cannot_be_forwarded_is_copied_instead(env, monkeypatch):
+    monkeypatch.setattr(clone, "DOWNLOAD_DIR", env)
+    events = []
+
+    async def fwd(src, dest, ids, thread_id):
+        if ids == [2]:
+            raise RuntimeError("CHAT_FORWARDS_RESTRICTED")
+        events.append(("fwd", ids[0]))
+
+    client = FakeClient([make_msg(1), make_msg(2, text="cap2"), make_msg(3)])      # public source -> forward mode
+    orig_send = client.send_file
+
+    async def send_file(dest, file=None, **kw):
+        events.append(("file", file.rsplit("/", 1)[-1]))
+        return await orig_send(dest, file=file, **kw)
+
+    client.send_file = send_file
+    monkeypatch.setattr(clone, "forward_to_topic", fwd)
+    monkeypatch.setattr(clone, "user_client", client)
+    statuses = []
+
+    async def status(t):
+        statuses.append(t)
+
+    asyncio.run(clone.clone_group("src", status))
+    assert events == [("fwd", 1), ("file", "2.jpg"), ("fwd", 3)]      # copied, and still in order
+    assert client.sent == [("file", "2.jpg", "cap2")]
+    assert db.get_sent("42") == {1, 2, 3} and "Failed: 0/3" in statuses[-1]
+    assert not (env / "42").exists()                                  # temp dir cleaned up
+
+
+def test_no_fallback_when_the_destination_is_the_problem(env, monkeypatch):
+    monkeypatch.setattr(clone, "DOWNLOAD_DIR", env)
+
+    async def fwd(src, dest, ids, thread_id):
+        raise ChatWriteForbiddenError(request=None)
+
+    client = FakeClient([make_msg(1), make_msg(2)])
+    monkeypatch.setattr(clone, "forward_to_topic", fwd)
+    monkeypatch.setattr(clone, "user_client", client)
+    statuses = []
+
+    async def status(t):
+        statuses.append(t)
+
+    asyncio.run(clone.clone_group("src", status))
+    assert client.downloads == [] and client.sent == []                # didn't waste time downloading
+    assert "Failed: 2/2" in statuses[-1] and db.get_sent("42") == set()
+
+
+def test_fallback_that_cannot_download_counts_as_failed(env, monkeypatch):
+    monkeypatch.setattr(clone, "DOWNLOAD_DIR", env)
+
+    async def fwd(src, dest, ids, thread_id):
+        raise RuntimeError("cannot forward")
+
+    client = FakeClient([make_msg(1)])
+    client.fail_download = {1}
+    monkeypatch.setattr(clone, "forward_to_topic", fwd)
+    monkeypatch.setattr(clone, "user_client", client)
+    statuses = []
+
+    async def status(t):
+        statuses.append(t)
+
+    asyncio.run(clone.clone_group("src", status))
+    assert client.sent == [] and "Failed: 1/1" in statuses[-1]
+    assert not (env / "42").exists()
