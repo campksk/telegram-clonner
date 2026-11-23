@@ -4,50 +4,91 @@ from typing import List
 
 from telethon.tl.functions.messages import CreateForumTopicRequest, GetForumTopicsRequest
 from telethon.tl.functions.messages import ForwardMessagesRequest
+from telethon.tl.types import MessageActionTopicCreate, UpdateMessageID
 
 from config import DEST_GROUP_ID, user_client
 
 log = logging.getLogger("clone-bot.worker.topics")
 
 
+TOPICS_PAGE = 100
+
+
+async def _iter_topics(dest_entity, q: str | None = None):
+    """Yield every forum topic of the destination group, page by page.
+
+    Telegram paginates topics by the top message of the last topic seen (offset_date + offset_id)
+    plus that topic's id (offset_topic), not by the topic id alone. A `seen` set guarantees the
+    loop ends even if the server returns a page we already saw.
+    """
+    offset_date, offset_id, offset_topic = 0, 0, 0
+    seen: set[int] = set()
+    while True:
+        kwargs = dict(peer=dest_entity, offset_date=offset_date, offset_id=offset_id,
+                      offset_topic=offset_topic, limit=TOPICS_PAGE)
+        if q is not None:
+            kwargs["q"] = q
+        result = await user_client(GetForumTopicsRequest(**kwargs))
+        page = list(result.topics)
+        fresh = [t for t in page if t.id not in seen]
+        if not fresh:
+            return
+        for t in fresh:
+            seen.add(t.id)
+            yield t
+        if len(page) < TOPICS_PAGE:
+            return
+        last = page[-1]
+        top = next((m for m in result.messages if m.id == getattr(last, "top_message", None)), None)
+        if top is None:
+            return  # can't compute the next offset safely
+        offset_date, offset_id, offset_topic = top.date, top.id, last.id
+
+
+def _topic_id_from_updates(created) -> int:
+    """The id of a newly created topic is the id of its 'topic created' service message."""
+    updates = getattr(created, "updates", None) or []
+    for u in updates:
+        msg = getattr(u, "message", None)
+        if isinstance(getattr(msg, "action", None), MessageActionTopicCreate):
+            return msg.id
+    for u in updates:
+        if isinstance(u, UpdateMessageID):
+            return u.id
+    raise RuntimeError("Telegram did not return the id of the new topic")
+
+
 async def get_or_create_topic(group_title: str) -> int:
     dest_entity = await user_client.get_entity(DEST_GROUP_ID)
-    search_title = group_title.strip().lower()
+    wanted = group_title.strip().lower()
 
-    # Pass 1: q search (fast)
+    def matches(topic) -> bool:
+        title = getattr(topic, "title", None)  # deleted topics have no title
+        return bool(title) and title.strip().lower() == wanted
+
+    # Pass 1: server-side search (fast)
     try:
-        result = await user_client(GetForumTopicsRequest(
-            peer=dest_entity, offset_date=0, offset_id=0, offset_topic=0, limit=100, q=group_title
-        ))
-        for topic in result.topics:
-            if topic.title.strip().lower() == search_title:
+        async for topic in _iter_topics(dest_entity, q=group_title):
+            if matches(topic):
                 log.info(f"Found topic: '{topic.title}' (id={topic.id})")
                 return topic.id
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug(f"topic search failed, falling back to full scan: {e}")
 
-    # Pass 2: full scan without q (paginate all topics)
-    offset_id = 0
-    while True:
-        result = await user_client(GetForumTopicsRequest(
-            peer=dest_entity, offset_date=0, offset_id=offset_id, offset_topic=0, limit=100
-        ))
-        if not result.topics:
-            break
-        for topic in result.topics:
-            if topic.title.strip().lower() == search_title:
-                log.info(f"Found topic (full scan): '{topic.title}' (id={topic.id})")
-                return topic.id
-        offset_id = result.topics[-1].id
+    # Pass 2: full scan without q
+    async for topic in _iter_topics(dest_entity):
+        if matches(topic):
+            log.info(f"Found topic (full scan): '{topic.title}' (id={topic.id})")
+            return topic.id
 
     log.info(f"Creating new topic '{group_title}'...")
     created = await user_client(CreateForumTopicRequest(peer=dest_entity, title=group_title.strip()))
-    return created.updates[0].id
+    return _topic_id_from_updates(created)
 
 
 async def forward_to_topic(from_peer, dest, msg_ids: list[int], thread_id: int) -> None:
     await user_client(ForwardMessagesRequest(
         from_peer=from_peer, id=msg_ids, to_peer=dest, top_msg_id=thread_id,
-        random_id=[random.randint(0, 2**63) for _ in msg_ids],
+        random_id=[random.randint(-(2**63), 2**63 - 1) for _ in msg_ids],  # signed 64-bit
         silent=False, drop_author=False
     ))
