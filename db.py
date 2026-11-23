@@ -1,10 +1,8 @@
 import json
 import logging
-import asyncio
 import os
 from pathlib import Path
 
-import aiofiles
 
 log = logging.getLogger("clone-bot.db")
 
