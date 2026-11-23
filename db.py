@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 
 
@@ -15,18 +16,48 @@ _sent_db: dict[str, set[int]] = {}
 _sent_urls: set[str] = set()
 
 
+def _read_sent(path: Path) -> dict[str, set[int]]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("expected a JSON object")
+    return {str(k): {int(i) for i in v} for k, v in raw.items()}
+
+
 def load_sent() -> None:
+    """Load the sent-message database.
+
+    If the main file exists but is unreadable it is set aside as '<name>.corrupt' (so it can never be
+    copied over the backup) and the last backup is used instead. A missing main file means 'start
+    fresh' - the backup is not used then, so deleting the file really does reset it.
+    """
     global _sent_db
+    _sent_db = {}
     if not SENT_DB_PATH.exists():
-        _sent_db = {}
         return
     try:
-        raw = json.loads(SENT_DB_PATH.read_text(encoding="utf-8"))
-        _sent_db = {k: set(v) for k, v in raw.items()}
+        _sent_db = _read_sent(SENT_DB_PATH)
         log.info(f"โหลด sent_db สำเร็จ ({sum(len(v) for v in _sent_db.values())} records)")
+        return
     except Exception as e:
-        log.warning(f"โหลด sent_db ล้มเหลว ใช้ค่าว่าง: {e}")
-        _sent_db = {}
+        log.error(f"{SENT_DB_PATH.name} is unreadable ({e})")
+
+    corrupt = SENT_DB_PATH.with_name(SENT_DB_PATH.name + ".corrupt")
+    try:
+        os.replace(SENT_DB_PATH, corrupt)
+        log.error(f"damaged file kept as {corrupt.name}")
+    except OSError as e:
+        log.error(f"could not move the damaged file aside: {e}")
+
+    if SENT_DB_BACKUP.exists():
+        try:
+            _sent_db = _read_sent(SENT_DB_BACKUP)
+            log.warning(f"restored sent_db from {SENT_DB_BACKUP.name} ({sum(len(v) for v in _sent_db.values())} records); "
+                        "the last few messages sent before the damage may be sent again")
+            return
+        except Exception as e:
+            log.error(f"{SENT_DB_BACKUP.name} is unreadable too ({e})")
+    log.error("starting with an empty sent_db")
+    _sent_db = {}
 
 
 def _write_atomic(path: Path, data: str) -> None:
@@ -39,10 +70,21 @@ def _write_atomic(path: Path, data: str) -> None:
         raise
 
 
+def _refresh_backup() -> None:
+    """Keep the previous (known-good, because writes are atomic) file as the rolling backup."""
+    if not SENT_DB_PATH.exists():
+        return
+    tmp = SENT_DB_BACKUP.with_name(SENT_DB_BACKUP.name + ".tmp")
+    try:
+        shutil.copyfile(SENT_DB_PATH, tmp)
+        os.replace(tmp, SENT_DB_BACKUP)
+    except Exception as e:
+        tmp.unlink(missing_ok=True)
+        log.warning(f"could not refresh {SENT_DB_BACKUP.name}: {e}")
+
+
 async def save_sent() -> None:
-    # backup before overwrite
-    if SENT_DB_PATH.exists() and not SENT_DB_BACKUP.exists():
-        SENT_DB_BACKUP.write_text(SENT_DB_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    _refresh_backup()
     try:
         data = json.dumps({k: list(v) for k, v in _sent_db.items()}, ensure_ascii=False)
         # Written synchronously on purpose: there is no await between serialising and replacing
