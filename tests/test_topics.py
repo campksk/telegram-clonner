@@ -26,6 +26,7 @@ class FakeServer:
         self.requests = []
         self.created = []
         self.create_result = None
+        self.register_created = False
 
     async def get_entity(self, ref):
         return types.SimpleNamespace(id=1)
@@ -44,6 +45,14 @@ class FakeServer:
             msgs = [types.SimpleNamespace(id=t.top_message, date=DATE) for t in page if hasattr(t, "top_message")]
             return types.SimpleNamespace(topics=page, messages=msgs)
         if isinstance(request, CreateForumTopicRequest):
+            if self.register_created:
+                await asyncio.sleep(0.05)               # creation takes a moment, like the real API
+                new_id = 500 + len(self.created)
+                self.created.append(request.title)
+                self.topics.append(types.SimpleNamespace(id=new_id, title=request.title, top_message=2000 + new_id))
+                service = types.SimpleNamespace(message=types.SimpleNamespace(
+                    id=new_id, action=MessageActionTopicCreate(title=request.title, icon_color=0)))
+                return types.SimpleNamespace(updates=[service])
             self.created.append(request.title)
             return self.create_result
         if isinstance(request, ForwardMessagesRequest):
@@ -108,3 +117,28 @@ def test_forward_random_ids_fit_signed_64_bit(server, monkeypatch):
     asyncio.run(topics.forward_to_topic(object(), object(), [1, 2, 3], 7))
     ids = server.requests[-1].random_id
     assert len(ids) == 3 and all(-(2**63) <= i <= 2**63 - 1 for i in ids)
+
+
+def test_concurrent_jobs_create_a_new_topic_only_once(server):
+    server.register_created = True
+
+    async def run():
+        return await asyncio.gather(
+            topics.get_or_create_topic("X Downloads"),
+            topics.get_or_create_topic("x downloads "),      # same topic, different spelling
+            topics.get_or_create_topic("X Downloads"),
+        )
+
+    ids = asyncio.run(run())
+    assert server.created == ["X Downloads"]               # used to create it three times
+    assert len(set(ids)) == 1
+
+
+def test_different_topics_do_not_wait_for_each_other(server):
+    server.register_created = True
+
+    async def run():
+        return await asyncio.gather(topics.get_or_create_topic("A"), topics.get_or_create_topic("B"))
+
+    a, b = asyncio.run(run())
+    assert sorted(server.created) == ["A", "B"] and a != b

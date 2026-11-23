@@ -1,6 +1,6 @@
+import asyncio
 import random
 import logging
-from typing import List
 
 from telethon.tl.functions.messages import CreateForumTopicRequest, GetForumTopicsRequest
 from telethon.tl.functions.messages import ForwardMessagesRequest
@@ -58,7 +58,25 @@ def _topic_id_from_updates(created) -> int:
     raise RuntimeError("Telegram did not return the id of the new topic")
 
 
+_topic_locks: dict[tuple, asyncio.Lock] = {}
+
+
+def _lock_for(title: str) -> asyncio.Lock:
+    # one lock per (event loop, title): different topics never wait for each other
+    return _topic_locks.setdefault((asyncio.get_running_loop(), title), asyncio.Lock())
+
+
 async def get_or_create_topic(group_title: str) -> int:
+    """Find the destination topic called `group_title`, creating it if needed.
+
+    Serialised per title, so two jobs that need the same new topic at the same moment (say two X
+    links sent back to back) don't both create it.
+    """
+    async with _lock_for(group_title.strip().lower()):
+        return await _find_or_create_topic(group_title)
+
+
+async def _find_or_create_topic(group_title: str) -> int:
     dest_entity = await user_client.get_entity(DEST_GROUP_ID)
     wanted = group_title.strip().lower()
 
