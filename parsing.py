@@ -1,5 +1,6 @@
 """Pure text-parsing helpers (no Telegram/network imports, so they are easy to test)."""
 import re
+from urllib.parse import urlsplit
 
 # Telethon matches this with re.match(); re.S lets the text span several lines.
 MESSAGE_PATTERN = re.compile(r"^(?!/)(.+)$", re.S)
@@ -49,3 +50,28 @@ def parse_source(target: str):
     if re.match(r"^[\w.\-]{4,}$", target):
         return target
     return None
+
+
+def normalize_url(url: str) -> str:
+    """Canonical form used for duplicate detection.
+
+    Drops tracking query strings/fragments, 'www.' and trailing '/', maps twitter.com -> x.com
+    and cuts tweet links after the status id (so /photo/1 and ?s=20 variants match).
+    """
+    parts = urlsplit(url.strip())
+    host = (parts.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host == "twitter.com":
+        host = "x.com"
+    path = parts.path.rstrip("/")
+    if host == "x.com":
+        m = re.match(r"(/[^/]+/status/\d+)", path)
+        if m:
+            path = m.group(1)
+    return f"https://{host}{path}"
+
+
+def wants_force(text: str) -> bool:
+    """True if the user prefixed/suffixed the link with the word 'force' (re-send a link already sent)."""
+    return bool(re.search(r"(?i)(?:^|\s)force(?:\s|$)", text or ""))

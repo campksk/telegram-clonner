@@ -50,7 +50,10 @@ async def handle_cancel(event: events.NewMessage.Event):
             await event.reply(f"⚠️ ไม่พบ job `{arg}`")
             return
         running[arg].cancel()
+        db.remove_pending_job(arg)  # explicit cancel: do not resume after restart
         await event.reply(f"🛑 ส่งสัญญาณยกเลิก `{arg}` แล้ว")
     else:
-        for task in running.values(): task.cancel()
+        for k, task in running.items():
+            task.cancel()
+            db.remove_pending_job(k)
         await event.reply(f"🛑 ส่งสัญญาณยกเลิกทั้งหมด {len(running)} job แล้ว")

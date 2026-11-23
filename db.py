@@ -99,8 +99,7 @@ async def mark_url_sent(url: str) -> None:
     _sent_urls.add(url)
     try:
         data = json.dumps({"urls": sorted(_sent_urls)}, ensure_ascii=False)
-        async with aiofiles.open(URLS_DB_PATH, "w", encoding="utf-8") as f:
-            await f.write(data)
+        _write_atomic(URLS_DB_PATH, data)
     except Exception as e:
         log.error(f"บันทึก sent_urls ล้มเหลว: {e}")
 
@@ -117,13 +116,21 @@ def load_pending_jobs() -> list[dict]:
 
 
 def save_pending_jobs(jobs: list[dict]) -> None:
-    JOBS_DB_PATH.write_text(json.dumps(jobs, ensure_ascii=False), encoding="utf-8")
+    _write_atomic(JOBS_DB_PATH, json.dumps(jobs, ensure_ascii=False))
 
 
-def add_pending_job(source_arg: str) -> None:
+def add_pending_job(source_arg: str, ref=None) -> None:
+    """Remember a running group clone so it can resume after a restart.
+
+    `source_arg` is the key (what the user typed); `ref` is the parsed source (int ID or username),
+    stored so resume doesn't have to re-parse text such as a private t.me/c/ link.
+    """
     jobs = load_pending_jobs()
     if not any(str(j.get("source")) == str(source_arg) for j in jobs):
-        jobs.append({"source": source_arg})
+        job = {"source": source_arg}
+        if ref is not None:
+            job["ref"] = ref
+        jobs.append(job)
         save_pending_jobs(jobs)
 
 

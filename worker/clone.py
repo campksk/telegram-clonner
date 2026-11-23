@@ -257,7 +257,8 @@ async def clone_single_message(chat: str | int, msg_id: int, status_cb: StatusCb
         try:
             await forward_to_topic(chat_entity, dest_entity, [m.id for m in batch], thread_id)
             actual_mode = "⚡ forward"
-        except Exception:
+        except Exception as e:
+            log.warning(f"single message: forward failed ({e}); falling back to download→upload")
             use_forward = False
 
     if not use_forward:
@@ -268,6 +269,9 @@ async def clone_single_message(chat: str | int, msg_id: int, status_cb: StatusCb
             for m in batch:
                 p = await user_client.download_media(m, file=str(job_dir) + "/")
                 if p: paths.append(p)
+            if not paths:
+                await status_cb("❌ Could not download the media")
+                return
             caption = batch[-1].text or ""
             if len(paths) == 1:
                 await user_client.send_file(dest_entity, file=paths[0], caption=caption, reply_to=thread_id, parse_mode="md")
@@ -278,4 +282,5 @@ async def clone_single_message(chat: str | int, msg_id: int, status_cb: StatusCb
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)
 
+    await db.mark_sent(str(chat_entity.id), {m.id for m in batch})  # so a later group clone doesn't send it again
     await status_cb(f"✅ Sent successfully!\n• Chat: **{chat_title}**\n• Files: {len(batch)}\n• Mode: {actual_mode}")

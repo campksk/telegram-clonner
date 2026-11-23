@@ -1,6 +1,6 @@
 import pytest
 
-from parsing import MESSAGE_PATTERN, extract_target, parse_source, parse_tg_link
+from parsing import MESSAGE_PATTERN, extract_target, normalize_url, parse_source, parse_tg_link, wants_force
 
 
 @pytest.mark.parametrize("url,expected", [
@@ -61,3 +61,28 @@ def test_extract_target(text, expected):
 ])
 def test_parse_source(target, expected):
     assert parse_source(target) == expected
+
+
+@pytest.mark.parametrize("a,b", [
+    ("https://twitter.com/user/status/123?s=20&t=abc", "https://x.com/user/status/123"),
+    ("https://x.com/user/status/123/photo/1", "https://x.com/user/status/123"),
+    ("https://www.instagram.com/p/AAA/?igsh=xyz", "https://instagram.com/p/AAA"),
+    ("https://www.tiktok.com/@u/video/1?lang=en#top", "https://tiktok.com/@u/video/1"),
+])
+def test_normalize_url(a, b):
+    assert normalize_url(a) == b
+
+
+def test_normalize_url_keeps_different_posts_apart():
+    assert normalize_url("https://x.com/user/status/123") != normalize_url("https://x.com/user/status/124")
+    assert normalize_url("https://instagram.com/p/AAA") != normalize_url("https://instagram.com/p/BBB")
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("force https://x.com/a/status/1", True),
+    ("https://x.com/a/status/1 FORCE", True),
+    ("https://x.com/a/status/1", False),
+    ("enforce https://x.com/a/status/1", False),
+])
+def test_wants_force(text, expected):
+    assert wants_force(text) is expected

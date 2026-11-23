@@ -44,6 +44,7 @@ Export: ใช้ extension [Get cookies.txt LOCALLY](https://chromewebstore.goo
 | X/Twitter | `https://x.com/user/status/123...` |
 | Instagram | `https://instagram.com/p/xxxxx` |
 | TikTok | `https://tiktok.com/@user/video/123...` |
+| ส่งซ้ำลิงก์ที่เคยส่งแล้ว | `force https://x.com/user/status/123...` |
 | Cancel | `/cancel` หรืือ `/cancel <source>` |
 | Jobs | `/jobs` |
 | Status | `/ping` |

@@ -23,6 +23,9 @@ class FakeClient:
             return types.SimpleNamespace(id=999)
         return types.SimpleNamespace(id=42, title="Src", noforwards=False)
 
+    async def get_messages(self, entity, ids=None, **kwargs):
+        return next(m for m in self.messages if m.id == ids)
+
     async def iter_messages(self, entity, reverse=False, **kwargs):
         for m in self.messages:
             yield m
@@ -119,3 +122,17 @@ def test_limit_does_not_split_an_album_and_tells_user(env, monkeypatch):
     asyncio.run(clone.clone_group("src", status))
     assert forwarded == [[1], [2], [3, 4]]
     assert any("MAX_SCAN_MESSAGES" in t for t in statuses)
+
+
+def test_single_message_is_recorded_as_sent(env, monkeypatch):
+    forwarded = []
+
+    async def fwd(src, dest, ids, thread_id):
+        forwarded.append(ids)
+
+    monkeypatch.setattr(clone, "forward_to_topic", fwd)
+    use_messages(monkeypatch, [make_msg(i) for i in range(1, 4)])
+    asyncio.run(clone.clone_single_message("src", 2, noop))
+    assert forwarded == [[2]]
+    assert db.get_sent("42") == {2}                       # a later group clone will skip it
+    assert json.loads((env / "sent_media.json").read_text()) == {"42": [2]}

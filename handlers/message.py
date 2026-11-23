@@ -1,19 +1,40 @@
-import asyncio
 import hashlib
 import logging
 import re
 from telethon import events
 
 import db
+import jobs
 import worker
-from config import bot_client, is_allowed, active_tasks
-from parsing import MESSAGE_PATTERN, extract_target, parse_source, parse_tg_link
+from config import bot_client, is_allowed
+from parsing import (
+    MESSAGE_PATTERN, extract_target, normalize_url, parse_source, parse_tg_link, wants_force,
+)
 
 log = logging.getLogger("clone-bot.message")
 
+X_RE = re.compile(r"https?://(?:www\.)?(?:twitter\.com|x\.com)/([^/]+)/status/(\d+)")
+IG_RE = re.compile(r"https?://(?:www\.)?instagram\.com/(?:p|reel|tv|stories)/([^/?#&]+)")
+TIKTOK_RE = re.compile(r"https?://(?:www\.|vm\.|vt\.)?tiktok\.com/\S+")
+
+
+def _site_job(arg: str):
+    """-> (task_key, label, clone function) for X / Instagram / TikTok links, else None."""
+    m = X_RE.search(arg)
+    if m:
+        return f"x_{m.group(2)}", "X", worker.clone_x_media
+    m = IG_RE.search(arg)
+    if m:
+        return f"ig_{m.group(1)}", "Instagram", worker.clone_ig_media
+    if TIKTOK_RE.search(arg):
+        digest = hashlib.md5(normalize_url(arg).encode()).hexdigest()[:12]
+        return f"tiktok_{digest}", "TikTok", worker.clone_tiktok_media
+    return None
+
+
 @bot_client.on(events.NewMessage(pattern=MESSAGE_PATTERN))
 async def handle_message(event: events.NewMessage.Event):
-    # 🌟 เพิ่ม 2 บรรทัดนี้: ถ้าข้อความไม่ได้มาจากแชทส่วนตัว ให้หยุดการทำงานทันที
+    # Private chats only
     if not event.is_private:
         return
 
@@ -22,99 +43,53 @@ async def handle_message(event: events.NewMessage.Event):
 
     # Use only the first URL of the message (links are often pasted with extra text or on
     # several lines); a bare ID/username with no URL is kept as-is.
-    arg = extract_target(event.pattern_match.group(1) or "")
+    raw = event.pattern_match.group(1) or ""
+    arg = extract_target(raw)
     if not arg: return
-    
+
     status_msg = await event.reply(f"🚀 กำลังประมวลผล `{arg}`...")
     async def status_cb(text: str):
         try: await status_msg.edit(text, parse_mode="md")
         except Exception: await event.respond(text, parse_mode="md")
 
+    # --- one message: t.me/<chat>/<id>, t.me/c/<chat>/<id> ---
     link_parsed = parse_tg_link(arg)
     if link_parsed:
         chat_ref, msg_id = link_parsed
-        asyncio.create_task(worker.clone_single_message(chat_ref, msg_id, status_cb))
+        key = f"msg_{chat_ref}_{msg_id}"
+        if jobs.is_running(key):
+            await event.reply("⚠️ กำลัง clone ข้อความนี้อยู่")
+            return
+        jobs.start_job(key, f"message `{msg_id}`", worker.clone_single_message(chat_ref, msg_id, status_cb), status_cb)
         return
 
-    # 🌟 เพิ่มส่วนนี้เข้าไป: ตรวจสอบว่าเป็นลิงก์ X / Twitter หรือไม่
-    x_match = re.search(r"https?://(?:www\.)?(?:twitter\.com|x\.com)/([^/]+)/status/(\d+)", arg)
-    if x_match:
-        task_key = f"x_{x_match.group(2)}"
-        if task_key in active_tasks and not active_tasks[task_key].done():
-            await event.reply(f"⚠️ กำลังโหลดลิงก์ X นี้อยู่...")
+    # --- X / Instagram / TikTok ---
+    site = _site_job(arg)
+    if site:
+        key, label, clone = site
+        if jobs.is_running(key):
+            await event.reply(f"⚠️ กำลังโหลดลิงก์ {label} นี้อยู่...")
+            return
+        norm = normalize_url(arg)
+        sent = db.get_sent_urls()
+        if not wants_force(raw) and (norm in sent or arg in sent):
+            await status_cb(f"ℹ️ Already sent before: `{arg}`\nSend `force {arg}` to send it again")
             return
 
-        async def _run_x():
-            try:
-                await worker.clone_x_media(arg, status_cb)
-                await db.mark_url_sent(arg)
-            except asyncio.CancelledError:
-                await status_cb(f"🛑 ยกเลิกโหลด X แล้ว")
-            finally:
-                active_tasks.pop(task_key, None)
+        async def mark_sent():
+            await db.mark_url_sent(norm)
 
-        active_tasks[task_key] = asyncio.create_task(_run_x())
+        jobs.start_job(key, f"{label} download", clone(arg, status_cb), status_cb, on_success=mark_sent)
         return
-    # (สิ้นสุดส่วนที่เพิ่ม)
 
-    # 🌟 เพิ่มส่วนดักจับ Instagram (รองรับทั้ง Post, Reel, TV และ Story)
-    ig_match = re.search(r"https?://(?:www\.)?instagram\.com/(?:p|reel|tv|stories)/([^/?#&]+)", arg)
-    if ig_match:
-        task_key = f"ig_{ig_match.group(1)}"
-        if task_key in active_tasks and not active_tasks[task_key].done():
-            await event.reply(f"⚠️ กำลังโหลดลิงก์ Instagram นี้อยู่...")
-            return
-
-        async def _run_ig():
-            try:
-                await worker.clone_ig_media(arg, status_cb)
-                await db.mark_url_sent(arg)
-            except asyncio.CancelledError:
-                await status_cb(f"🛑 ยกเลิกโหลด Instagram แล้ว")
-            finally:
-                active_tasks.pop(task_key, None)
-
-        active_tasks[task_key] = asyncio.create_task(_run_ig())
-        return
-    # (สิ้นสุดส่วน Instagram)
-
-    # 🌟 เพิ่มส่วนดักจับ TikTok (รองรับทั้งเว็บปกติและลิงก์แชร์แบบสั้น)
-    tiktok_match = re.search(r"https?://(?:www\.|vm\.|vt\.)?tiktok\.com/\S+", arg)
-    if tiktok_match:
-        task_key = f"tiktok_{hashlib.md5(arg.encode()).hexdigest()[:12]}"
-        
-        async def _run_tiktok():
-            try:
-                await worker.clone_tiktok_media(arg, status_cb)
-                await db.mark_url_sent(arg)
-            except asyncio.CancelledError:
-                await status_cb(f"🛑 ยกเลิกโหลด TikTok แล้ว")
-            finally:
-                active_tasks.pop(task_key, None)
-
-        active_tasks[task_key] = asyncio.create_task(_run_tiktok())
-        return
-    # (สิ้นสุดส่วน TikTok)
-
-    # Whole group / channel / user
+    # --- whole group / channel / user ---
     source = parse_source(arg)
     if source is None:
         await status_cb(f"⚠️ not recognized: `{arg}`\nSend a t.me link, numeric ID, or username")
         return
 
-    task_key = str(arg)
-    if task_key in active_tasks and not active_tasks[task_key].done():
+    key = str(arg)
+    if jobs.is_running(key):
         await event.reply(f"⚠️ `{arg}` กำลัง clone อยู่ พิมพ์ `/cancel` เพื่อหยุด")
         return
-
-    async def _run():
-        db.add_pending_job(task_key)
-        try:
-            await worker.clone_group(source, status_cb)
-        except asyncio.CancelledError:
-            await status_cb(f"🛑 ยกเลิก clone `{arg}` แล้ว")
-        finally:
-            db.remove_pending_job(task_key)
-            active_tasks.pop(task_key, None)
-
-    active_tasks[task_key] = asyncio.create_task(_run())
+    jobs.start_group_job(key, source, status_cb)
