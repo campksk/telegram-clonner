@@ -80,6 +80,9 @@ def test_backup_follows_the_previous_save(tmp_path, monkeypatch):
     asyncio.run(db.save_sent())
     assert json.loads(bak.read_text()) == {"1": [1]}      # the state before the last save
     assert sorted(json.loads(main.read_text())["1"]) == [1, 2]
+    db._sent_db["1"].add(3)
+    asyncio.run(db.save_sent())
+    assert sorted(json.loads(bak.read_text())["1"]) == [1, 2]   # keeps following (used to stay at the first state forever)
     assert not list(tmp_path.glob("*.tmp"))
 
 

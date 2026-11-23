@@ -2,13 +2,12 @@ import asyncio
 import os
 import shutil
 import sys
-import time
 import logging
 from pathlib import Path
 from typing import Callable, Awaitable
 
 from worker.utils import retry_flood
-from config import DOWNLOAD_DIR, DEST_GROUP_ID, user_client
+from config import DEST_GROUP_ID, user_client
 
 log = logging.getLogger("clone-bot.worker.gallery")
 StatusCb = Callable[[str], Awaitable[None]]
