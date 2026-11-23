@@ -1,6 +1,8 @@
 """Sending downloaded media with its caption."""
 import logging
 
+from worker.utils import retry_flood
+
 log = logging.getLogger("clone-bot.worker.sender")
 
 CAPTION_LIMIT = 1024    # Telegram's media caption limit for regular accounts
@@ -45,12 +47,12 @@ async def send_media(client, dest, paths: list[str], caption: str, thread_id: in
         overflow, caption = caption, ""
 
     if len(paths) == 1:
-        await client.send_file(dest, file=paths[0], caption=caption, reply_to=thread_id, parse_mode="md")
+        await retry_flood(lambda: client.send_file(dest, file=paths[0], caption=caption, reply_to=thread_id, parse_mode="md"), "send file")
     elif len(paths) > 1:
         captions = [caption] + [""] * (len(paths) - 1)
-        await client.send_file(dest, file=paths, caption=captions, reply_to=thread_id, parse_mode="md")
+        await retry_flood(lambda: client.send_file(dest, file=paths, caption=captions, reply_to=thread_id, parse_mode="md"), "send album")
     else:
         return
 
     for chunk in split_text(overflow):
-        await client.send_message(dest, chunk, reply_to=thread_id, parse_mode="md")
+        await retry_flood(lambda c=chunk: client.send_message(dest, c, reply_to=thread_id, parse_mode="md"), "send caption text")

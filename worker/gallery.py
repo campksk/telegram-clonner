@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import Callable, Awaitable
 
+from worker.utils import retry_flood
 from config import DOWNLOAD_DIR, DEST_GROUP_ID, user_client
 
 log = logging.getLogger("clone-bot.worker.gallery")
@@ -114,15 +115,15 @@ async def upload_to_group(paths: list[list[str]], thread_id: int, site_name: str
                 batch = group[i:i+10]
                 try:
                     if len(batch) == 1:
-                        await user_client.send_file(dest_entity, file=batch[0], reply_to=thread_id)
+                        await retry_flood(lambda: user_client.send_file(dest_entity, file=batch[0], reply_to=thread_id), "upload")
                     else:
-                        await user_client.send_file(dest_entity, file=batch, reply_to=thread_id)
+                        await retry_flood(lambda: user_client.send_file(dest_entity, file=batch, reply_to=thread_id), "upload album")
                     sent_files += len(batch)
                 except Exception:
                     # Fallback: send one by one
                     for p in batch:
                         try:
-                            await user_client.send_file(dest_entity, file=p, reply_to=thread_id)
+                            await retry_flood(lambda p=p: user_client.send_file(dest_entity, file=p, reply_to=thread_id), "upload")
                             sent_files += 1
                         except Exception as e:
                             log.warning(f"{site_name}: skip file {p}: {e}")

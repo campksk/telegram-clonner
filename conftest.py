@@ -15,3 +15,21 @@ os.environ.update(
     DOWNLOAD_DIR=f"{_tmp}/downloads",
 )
 sys.path.insert(0, str(Path(__file__).parent))
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def flood_sleeps(monkeypatch):
+    """FloodWait sleeps are recorded instead of slept, and carry no safety margin, so tests stay fast."""
+    from worker import utils
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(utils, "_sleep", fake_sleep)
+    monkeypatch.setattr(utils, "FLOOD_MARGIN", 0)
+    return sleeps

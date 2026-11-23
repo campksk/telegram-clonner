@@ -53,3 +53,37 @@ def test_send_media_single_album_and_long_caption():
     r = Recorder()
     asyncio.run(send_media(r, "d", [], "cap", 7))
     assert r.calls == []
+
+
+class FloodyRecorder(Recorder):
+    def __init__(self, floods):
+        super().__init__()
+        self.floods = dict(floods)
+
+    def _maybe_flood(self, kind):
+        from telethon.errors import FloodWaitError
+        if self.floods.get(kind, 0) > 0:
+            self.floods[kind] -= 1
+            raise FloodWaitError(request=None, capture=1)
+
+    async def send_file(self, *a, **kw):
+        self._maybe_flood("file")
+        return await super().send_file(*a, **kw)
+
+    async def send_message(self, *a, **kw):
+        self._maybe_flood("msg")
+        return await super().send_message(*a, **kw)
+
+
+def test_flood_on_the_media_is_retried_without_duplicating_it(flood_sleeps):
+    r = FloodyRecorder({"file": 1})
+    asyncio.run(send_media(r, "d", ["a.jpg"], "cap", 7))
+    assert r.calls == [("file", "a.jpg", "cap")] and flood_sleeps == [1]
+
+
+def test_flood_on_the_overflow_text_does_not_resend_the_media(flood_sleeps):
+    r = FloodyRecorder({"msg": 2})
+    long_caption = "L" * (CAPTION_LIMIT + 10)
+    asyncio.run(send_media(r, "d", ["a.jpg"], long_caption, 7))
+    assert [c[0] for c in r.calls] == ["file", "msg"]      # media exactly once, text delivered after the waits
+    assert flood_sleeps == [1, 1]

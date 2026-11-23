@@ -3,6 +3,7 @@ import json
 import types
 
 import pytest
+from telethon.errors import FloodWaitError
 
 import db
 from worker import clone
@@ -22,6 +23,7 @@ class FakeClient:
         self.download_delay = {}
         self.fail_download = set()
         self.active = self.max_active = 0
+        self.flood_send = 0     # number of upcoming send_file calls that answer FloodWait
 
     async def get_entity(self, ref):
         if ref == clone.DEST_GROUP_ID:
@@ -43,6 +45,9 @@ class FakeClient:
         return path
 
     async def send_file(self, dest, file=None, caption=None, reply_to=None, parse_mode=None):
+        if self.flood_send > 0:
+            self.flood_send -= 1
+            raise FloodWaitError(request=None, capture=4)
         self.sent.append(("file", [p.rsplit("/", 1)[-1] for p in file] if isinstance(file, list) else file.rsplit("/", 1)[-1], caption))
 
     async def send_message(self, dest, text, reply_to=None, parse_mode=None):
@@ -285,3 +290,57 @@ def test_batch_where_every_download_fails_counts_as_failed(env, monkeypatch):
     assert client.sent == []
     assert "Success: 0/2" in statuses[-1] and "Failed: 2/2" in statuses[-1]   # used to show neither
     assert db.get_sent("42") == set()
+
+
+# ---------- FloodWait ----------
+
+def test_flood_wait_on_forward_is_waited_out_and_retried(env, monkeypatch, flood_sleeps):
+    forwarded, floods = [], {2: 1}
+
+    async def fwd(src, dest, ids, thread_id):
+        if floods.get(ids[0], 0) > 0:
+            floods[ids[0]] -= 1
+            raise FloodWaitError(request=None, capture=30)
+        forwarded.append(ids[0])
+
+    monkeypatch.setattr(clone, "forward_to_topic", fwd)
+    use_messages(monkeypatch, [make_msg(i) for i in range(1, 4)])
+    statuses = []
+
+    async def status(t):
+        statuses.append(t)
+
+    asyncio.run(clone.clone_group("src", status))
+    assert forwarded == [1, 2, 3]                       # message 2 used to be dropped as "failed"
+    assert flood_sleeps == [30]
+    assert db.get_sent("42") == {1, 2, 3} and "Failed: 0/3" in statuses[-1]
+
+
+def test_endless_flood_wait_fails_only_that_batch(env, monkeypatch, flood_sleeps):
+    forwarded = []
+
+    async def fwd(src, dest, ids, thread_id):
+        if ids == [2]:
+            raise FloodWaitError(request=None, capture=1)
+        forwarded.append(ids[0])
+
+    monkeypatch.setattr(clone, "forward_to_topic", fwd)
+    use_messages(monkeypatch, [make_msg(i) for i in range(1, 4)])
+    statuses = []
+
+    async def status(t):
+        statuses.append(t)
+
+    asyncio.run(asyncio.wait_for(clone.clone_group("src", status), 10))
+    assert forwarded == [1, 3] and db.get_sent("42") == {1, 3}
+    assert "Failed: 1/3" in statuses[-1]
+
+
+def test_flood_wait_on_upload_does_not_duplicate_the_media(env, monkeypatch, flood_sleeps):
+    monkeypatch.setattr(clone, "DOWNLOAD_DIR", env)
+    client = FakeClient([make_msg(1, text="cap")], noforwards=True)
+    client.flood_send = 2
+    monkeypatch.setattr(clone, "user_client", client)
+    asyncio.run(clone.clone_group("src", noop))
+    assert client.sent == [("file", "1.jpg", "cap")]    # sent exactly once after two waits
+    assert flood_sleeps == [4, 4] and db.get_sent("42") == {1}

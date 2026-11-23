@@ -4,18 +4,13 @@ import shutil
 from pathlib import Path
 from typing import Callable, Awaitable
 
-from telethon.errors import FloodWaitError, ChatAdminRequiredError
-from telethon.errors.rpcbaseerrors import FloodError
-try:
-    from telethon.errors import FloodPremiumWaitError
-except ImportError:
-    FloodPremiumWaitError = FloodError
+from telethon.errors import ChatAdminRequiredError
 from telethon.tl.types import User as TLUser
 
 import db
 from config import DEST_GROUP_ID, DOWNLOAD_DIR, SEND_DELAY, PARALLEL_WORKERS, PRESERVE_ORDER, MAX_SCAN_MESSAGES, user_client
 
-from worker.utils import _flood_seconds, is_supported_media, is_public_entity
+from worker.utils import retry_flood, is_supported_media, is_public_entity
 from worker.sender import pick_caption, send_media
 from worker.topics import get_or_create_topic, forward_to_topic
 
@@ -158,16 +153,16 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
                 await turns[b_idx - 1].wait()
             try:
                 if use_forward:
-                    await forward_to_topic(source_entity, dest_entity, [m.id for m in batch], thread_id)
+                    await retry_flood(
+                        lambda: forward_to_topic(source_entity, dest_entity, [m.id for m in batch], thread_id),
+                        f"forward {b_idx}")
                     delivered = list(batch)
                 elif got:
                     await send_media(user_client, dest_entity, [p for _, p in got], pick_caption(batch), thread_id)
                     delivered = [m for m, _ in got]
-            except (FloodWaitError, FloodPremiumWaitError) as e:
-                await asyncio.sleep(_flood_seconds(e) + 2)
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
+            except Exception as e:  # incl. a FloodWait that outlasted all retries
                 log.error(f"[{'fwd' if use_forward else 'up'} {b_idx}] ✗ {e}")
             finally:
                 turns[b_idx].set()  # always release the next batch, even if this one failed
@@ -252,7 +247,9 @@ async def clone_single_message(chat: str | int, msg_id: int, status_cb: StatusCb
     
     if use_forward:
         try:
-            await forward_to_topic(chat_entity, dest_entity, [m.id for m in batch], thread_id)
+            await retry_flood(
+                lambda: forward_to_topic(chat_entity, dest_entity, [m.id for m in batch], thread_id),
+                "forward")
             actual_mode = "⚡ forward"
         except Exception as e:
             log.warning(f"single message: forward failed ({e}); falling back to download→upload")
