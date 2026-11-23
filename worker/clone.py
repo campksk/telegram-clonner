@@ -16,6 +16,7 @@ import db
 from config import DEST_GROUP_ID, DOWNLOAD_DIR, SEND_DELAY, PARALLEL_WORKERS, MAX_SCAN_MESSAGES, user_client
 
 from worker.utils import _flood_seconds, is_supported_media, is_public_entity
+from worker.sender import pick_caption, send_media
 from worker.topics import get_or_create_topic, forward_to_topic
 
 log = logging.getLogger("clone-bot.worker.clone")
@@ -162,12 +163,7 @@ async def clone_group(source: str | int, status_cb: StatusCb) -> None:
                                     await asyncio.sleep(2 * (attempt + 1))
                     if not paths:
                         return
-                    caption = batch[-1].text or ""
-                    if len(paths) == 1:
-                        await user_client.send_file(dest_entity, file=paths[0], caption=caption, reply_to=thread_id, parse_mode="md")
-                    elif len(paths) > 1:
-                        captions = [caption] + [""] * (len(paths) - 1)
-                        await user_client.send_file(dest_entity, file=paths, caption=captions, reply_to=thread_id, parse_mode="md")
+                    await send_media(user_client, dest_entity, paths, pick_caption(batch), thread_id)
                     async with lock:
                         counters["success"] += len(batch)
                         db.mark_sent_sync(src_key, {m.id for m in batch})
@@ -272,12 +268,7 @@ async def clone_single_message(chat: str | int, msg_id: int, status_cb: StatusCb
             if not paths:
                 await status_cb("❌ Could not download the media")
                 return
-            caption = batch[-1].text or ""
-            if len(paths) == 1:
-                await user_client.send_file(dest_entity, file=paths[0], caption=caption, reply_to=thread_id, parse_mode="md")
-            elif len(paths) > 1:
-                captions = [caption] + [""] * (len(paths) - 1)
-                await user_client.send_file(dest_entity, file=paths, caption=captions, reply_to=thread_id, parse_mode="md")
+            await send_media(user_client, dest_entity, paths, pick_caption(batch), thread_id)
             actual_mode = "📥 upload"
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)

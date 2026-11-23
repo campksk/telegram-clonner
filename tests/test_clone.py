@@ -8,20 +8,34 @@ import db
 from worker import clone
 
 
-def make_msg(i, grouped=None):
-    return types.SimpleNamespace(id=i, grouped_id=grouped, sticker=None, photo=object(), document=None, text="")
+def make_msg(i, grouped=None, text=""):
+    return types.SimpleNamespace(id=i, grouped_id=grouped, sticker=None, photo=object(), document=None, text=text)
 
 
 class FakeClient:
     """Just enough of TelegramClient for clone_group in forward mode."""
 
-    def __init__(self, messages):
+    def __init__(self, messages, noforwards=False):
         self.messages = messages
+        self.noforwards = noforwards
+        self.sent = []          # ("file", file, caption) / ("msg", text)
 
     async def get_entity(self, ref):
         if ref == clone.DEST_GROUP_ID:
             return types.SimpleNamespace(id=999)
-        return types.SimpleNamespace(id=42, title="Src", noforwards=False)
+        return types.SimpleNamespace(id=42, title="Src", noforwards=self.noforwards)
+
+    async def download_media(self, msg, file=None):
+        path = f"{file}{msg.id}.jpg"
+        with open(path, "wb") as f:
+            f.write(b"x")
+        return path
+
+    async def send_file(self, dest, file=None, caption=None, reply_to=None, parse_mode=None):
+        self.sent.append(("file", [p.rsplit("/", 1)[-1] for p in file] if isinstance(file, list) else file.rsplit("/", 1)[-1], caption))
+
+    async def send_message(self, dest, text, reply_to=None, parse_mode=None):
+        self.sent.append(("msg", text))
 
     async def get_messages(self, entity, ids=None, **kwargs):
         return next(m for m in self.messages if m.id == ids)
@@ -136,3 +150,22 @@ def test_single_message_is_recorded_as_sent(env, monkeypatch):
     assert forwarded == [[2]]
     assert db.get_sent("42") == {2}                       # a later group clone will skip it
     assert json.loads((env / "sent_media.json").read_text()) == {"42": [2]}
+
+
+def test_album_caption_comes_from_the_message_that_has_it(env, monkeypatch):
+    monkeypatch.setattr(clone, "DOWNLOAD_DIR", env)
+    client = FakeClient([make_msg(1, grouped=9, text="album caption"), make_msg(2, grouped=9), make_msg(3, text="single")], noforwards=True)
+    monkeypatch.setattr(clone, "user_client", client)
+    asyncio.run(clone.clone_group("src", noop))
+    assert client.sent == [("file", ["1.jpg", "2.jpg"], ["album caption", ""]), ("file", "3.jpg", "single")]
+    assert db.get_sent("42") == {1, 2, 3}
+
+
+def test_oversized_caption_does_not_fail_the_upload(env, monkeypatch):
+    monkeypatch.setattr(clone, "DOWNLOAD_DIR", env)
+    big = "B" * 2000
+    client = FakeClient([make_msg(1, text=big)], noforwards=True)
+    monkeypatch.setattr(clone, "user_client", client)
+    asyncio.run(clone.clone_group("src", noop))
+    assert client.sent == [("file", "1.jpg", ""), ("msg", big)]
+    assert db.get_sent("42") == {1}
