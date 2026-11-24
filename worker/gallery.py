@@ -2,6 +2,7 @@ import asyncio
 import os
 import shutil
 import sys
+import importlib.util
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,10 +48,18 @@ COOKIE_FILES = {
 
 
 def _gallery_dl_cmd() -> list[str]:
-    """Return the full path to gallery-dl binary."""
-    venv_bin = Path(sys.executable).parent / "gallery-dl"
-    if venv_bin.exists():
-        return [str(venv_bin)]
+    """The command that starts gallery-dl.
+
+    Preferably `python -m gallery_dl` with the interpreter that runs the bot: it needs no PATH setup, and
+    on Windows there is no launcher .exe between us and gallery-dl (killing a launcher would leave the
+    real gallery-dl running). Falls back to a gallery-dl executable next to Python or on PATH.
+    """
+    if importlib.util.find_spec("gallery_dl") is not None:
+        return [sys.executable, "-m", "gallery_dl"]
+    for name in ("gallery-dl", "gallery-dl.exe"):
+        venv_bin = Path(sys.executable).parent / name
+        if venv_bin.exists():
+            return [str(venv_bin)]
     gd = shutil.which("gallery-dl")
     if gd:
         return [gd]
@@ -89,7 +98,7 @@ async def _run_gallery_dl(url: str, job_dir: Path, extra_args: list[str]) -> tup
 
     if process.returncode != 0:
         err = stderr.decode("utf-8", "replace").strip() or stdout.decode("utf-8", "replace").strip()
-        return False, err
+        return False, err or f"gallery-dl exited with code {process.returncode}"
     return True, ""
 
 
@@ -135,11 +144,18 @@ async def stream_gallery_dl_print(url: str, extra_args: list[str], fmt: str, on_
                 stopped_early = True
                 return
 
+    async def run():
+        await read_stdout()
+        if not stopped_early:
+            # The output ending does not mean the process has exited yet. Wait for it - killing it now
+            # would replace its real exit status (0) with a failure.
+            await process.wait()
+
     try:
-        await asyncio.wait_for(read_stdout(), timeout)
+        await asyncio.wait_for(run(), timeout)
     except asyncio.TimeoutError:
         return False, f"gallery-dl timeout ({timeout}s)"
-    finally:  # also on cancel: never leave gallery-dl running
+    finally:  # still running here only if we stopped early, timed out or were cancelled: don't leave it behind
         if process.returncode is None:
             process.kill()
         await process.wait()
@@ -148,7 +164,8 @@ async def stream_gallery_dl_print(url: str, extra_args: list[str], fmt: str, on_
     if stopped_early:
         return True, ""
     if process.returncode != 0:
-        return False, err_tail.decode("utf-8", "replace").strip()[-500:]
+        err = err_tail.decode("utf-8", "replace").strip()[-500:]
+        return False, err or f"gallery-dl exited with code {process.returncode}"
     return True, ""
 
 

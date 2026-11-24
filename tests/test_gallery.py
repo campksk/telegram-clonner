@@ -1,10 +1,12 @@
 import asyncio
 import functools
 import http.server
+import importlib.util
 import json
 import os
 import shutil
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -155,7 +157,7 @@ def test_site_directory_templates_are_valid(site, sample):
 
 # ---------- the real gallery-dl, against a local web server (no internet needed) ----------
 
-@pytest.mark.skipif(shutil.which("gallery-dl") is None and not os.path.exists(os.path.join(os.path.dirname(os.sys.executable), "gallery-dl")),
+@pytest.mark.skipif(importlib.util.find_spec("gallery_dl") is None and shutil.which("gallery-dl") is None,
                     reason="gallery-dl is not installed")
 def test_real_gallery_dl_puts_each_post_in_its_own_username_directory(tmp_path):
     served = tmp_path / "served"
@@ -173,7 +175,7 @@ def test_real_gallery_dl_puts_each_post_in_its_own_username_directory(tmp_path):
         assert ok, err
         posts = collect_posts(out)
         assert [(p.username, len(p.files)) for p in posts] == [("anna", 1)]
-        assert "/anna/98765/" in posts[0].files[0]
+        assert Path(posts[0].files[0]).parent.parts[-2:] == ("anna", "98765")      # (os.sep differs per platform)
     finally:
         server.shutdown()
 

@@ -1,5 +1,5 @@
 import asyncio
-import os
+import importlib.util
 import shutil
 import sys
 
@@ -273,10 +273,12 @@ def test_stream_asks_for_unbuffered_output(monkeypatch):
     assert got == ["1"]
 
 
-@pytest.mark.skipif(shutil.which("gallery-dl") is None and not os.path.exists(os.path.join(os.path.dirname(sys.executable), "gallery-dl")),
+@pytest.mark.skipif(importlib.util.find_spec("gallery_dl") is None and shutil.which("gallery-dl") is None,
                     reason="gallery-dl is not installed")
-def test_real_gallery_dl_print_mode_lists_without_downloading(tmp_path):
-    import functools, http.server, threading
+def test_real_gallery_dl_print_mode_lists_without_downloading(tmp_path, monkeypatch):
+    import functools
+    import http.server
+    import threading
     served = tmp_path / "s"
     served.mkdir()
     (served / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"x" * 3000 + b"\xff\xd9")
@@ -285,13 +287,37 @@ def test_real_gallery_dl_print_mode_lists_without_downloading(tmp_path):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        cwd = os.getcwd()
-        os.chdir(tmp_path)
+        monkeypatch.chdir(tmp_path)          # gallery-dl would drop downloads into the current directory
         got = []
         ok, err = run(gallery.stream_gallery_dl_print(f"http://127.0.0.1:{server.server_address[1]}/a.jpg", [], "{filename}", lambda l: got.append(l) or False))
-        os.chdir(cwd)
         assert ok, err
         assert got == ["a"]
         assert not [p for p in tmp_path.rglob("*") if p.is_file() and p.parent != served]   # nothing downloaded
     finally:
         server.shutdown()
+
+
+# ---------- regressions found by running the suite on Windows ----------
+
+def test_stream_waits_for_the_process_to_exit_after_its_output_ends(monkeypatch):
+    # stdout is closed first and the process exits a moment later (normal for gallery-dl, especially on
+    # Windows). The old code killed it at that point, which turned a successful run into a failure.
+    fake_gallery_dl(monkeypatch, "import os, time\nprint('a', flush=True)\nos.close(1)\ntime.sleep(0.6)\n")
+    got = []
+    assert run(gallery.stream_gallery_dl_print("u", [], "{x}", lambda l: got.append(l) or False)) == (True, "")
+    assert got == ["a"]
+
+
+def test_failure_without_any_error_text_still_says_what_happened(monkeypatch):
+    fake_gallery_dl(monkeypatch, "import sys; sys.exit(3)")
+    ok, err = run(gallery.stream_gallery_dl_print("u", [], "{x}", lambda l: False))
+    assert not ok and "exited with code 3" in err
+    ok, err = run(gallery._run_gallery_dl("u", ".", []))
+    assert not ok and "exited with code 3" in err
+
+
+def test_gallery_dl_is_started_through_the_current_python_when_installed():
+    import importlib.util
+    if importlib.util.find_spec("gallery_dl") is None:
+        pytest.skip("gallery-dl is not installed in this Python")
+    assert gallery._gallery_dl_cmd() == [sys.executable, "-m", "gallery_dl"]    # no launcher .exe in between
