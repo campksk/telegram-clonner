@@ -24,18 +24,18 @@ async def main():
     
     db.load_sent()
     db.load_sent_urls()
-    log.info("กำลังเชื่อมต่อ User client...")
+    log.info("Connecting user client...")
     await user_client.start()
-    log.info("กำลังเชื่อมต่อ Bot client...")
+    log.info("Connecting bot client...")
     await bot_client.start(bot_token=BOT_TOKEN)
     
     await bot_client(SetBotCommandsRequest(
         scope=BotCommandScopeDefault(),
         lang_code="",
         commands=[
-            BotCommand(command="cancel", description="ยกเลิก job (ทั้งหมด หรือระบุ source)"),
-            BotCommand(command="jobs", description="ดู job ที่ทำงานอยู่"),
-            BotCommand(command="ping", description="เช็คสถานะ server"),
+            BotCommand(command="cancel", description="Cancel jobs (all, or name one)"),
+            BotCommand(command="jobs", description="List running jobs"),
+            BotCommand(command="ping", description="Server status"),
         ]
     ))
 
@@ -45,9 +45,9 @@ async def main():
 
     resumed = jobs.resume_pending_jobs(_resume_status)
     if resumed:
-        log.info(f"พบ {resumed} pending job — กำลัง resume...")
+        log.info(f"Found {resumed} pending job(s) - resuming...")
 
-    log.info("✅ ระบบพร้อมรับข้อความและลิงก์อัตโนมัติ")
+    log.info("✅ Ready - send a link or a message")
     await bot_client.run_until_disconnected()
 
 if __name__ == "__main__":

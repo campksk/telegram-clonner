@@ -1,89 +1,92 @@
 # tg-clone-bot
 
-บอท Telegram สำหรับโคลนสื่อ (รูป วิดีโอ ไฟล์) จากกลุ่มหรือช่อง รวมถึงดาวน์โหลดจาก X, Instagram และ TikTok แล้วส่งไปยังกลุ่มปลายทาง โดยแยกเป็น Topic ตามต้นทาง
+A Telegram bot that clones media (photos, videos, files) from groups and channels, and downloads posts from X, Instagram and TikTok, into a destination group. Everything is sorted into Topics: one per source chat for Telegram sources, and one per username for X, Instagram and TikTok.
 
-## การติดตั้ง
+## Setup
 
 ```bash
-cp .env.example .env   # แล้วแก้ค่าใน .env ให้ครบ
-./setup.sh             # สร้าง venv และติดตั้งแพ็กเกจ
-./run.sh               # เริ่มบอท
+cp .env.example .env   # then fill in the values in .env
+./setup.sh             # creates a venv and installs the packages
+./run.sh               # starts the bot
 ```
 
-ครั้งแรกที่รัน บอทจะถามเบอร์โทรและรหัสยืนยันของ user account ในเทอร์มินัล เพื่อสร้าง session (เก็บไว้ในโฟลเดอร์ `sessions/`)
+The first time you run it, the bot asks in the terminal for your phone number and the login code of your user account, to create a session (stored in `sessions/`).
 
-บอทใช้ user account ของคุณในการอ่านและคัดลอกสื่อ ส่วน Bot Token ใช้รับคำสั่งจากคุณ
+The bot uses your user account to read and copy media; the bot token is only used to receive your commands.
 
-## การตั้งค่า (.env)
+## Configuration (.env)
 
-| ตัวแปร | คำอธิบาย |
-|--------|----------|
-| API_ID | Telegram API ID (ขอได้ที่ https://my.telegram.org) |
-| API_HASH | Telegram API Hash |
-| BOT_TOKEN | โทเค็นของบอท (จาก @BotFather) |
-| DEST_GROUP_ID | ID กลุ่มปลายทาง (user account ต้องเป็นแอดมิน และกลุ่มต้องเปิดใช้ Topics) |
-| ALLOWED_USER_IDS | **จำเป็น** — ID ผู้ใช้ที่มีสิทธิ์สั่งบอท คั่นด้วย `,` ถ้าว่างบอทจะไม่เริ่มทำงาน |
-| SEND_DELAY | ระยะเวลาหน่วงระหว่างการส่ง (วินาที) ค่าเริ่มต้น 1.5 |
-| PARALLEL_WORKERS | จำนวน worker ที่ทำงานพร้อมกัน ค่าเริ่มต้น 3 |
-| PRESERVE_ORDER | `1` = ส่งตามลำดับข้อความเดิมเสมอ (ค่าเริ่มต้น) · `0` = เร็วกว่า แต่ลำดับอาจสลับ (โดยเฉพาะโหมด forward) |
-| MAX_SCAN_MESSAGES | จำนวนสื่อใหม่สูงสุดต่อการรัน 1 ครั้ง (ค่าเริ่มต้น 10000) ส่งลิงก์เดิมซ้ำเพื่อทำต่อ |
+| Variable | Description |
+|----------|-------------|
+| API_ID | Telegram API ID (get it at https://my.telegram.org) |
+| API_HASH | Telegram API hash |
+| BOT_TOKEN | Bot token from @BotFather |
+| DEST_GROUP_ID | ID of the destination group (your user account must be an admin and the group must have Topics enabled) |
+| ALLOWED_USER_IDS | **Required** — IDs of the users allowed to command the bot, separated by `,`. If empty the bot refuses to start |
+| SEND_DELAY | Pause between sends, in seconds (default 1.5) |
+| PARALLEL_WORKERS | Number of workers running at the same time (default 3) |
+| PRESERVE_ORDER | `1` = always send in the original message order (default) · `0` = faster, but the order may get mixed up (especially in forward mode) |
+| MAX_SCAN_MESSAGES | Maximum number of new media per run when cloning a chat (default 10000). Send the same source again to continue |
 | PROFILE_MAX_POSTS | New Instagram profile posts per run (default 20). Send the profile link again to continue with older posts |
 | PROFILE_POST_DELAY | Seconds to pause between profile posts (default 3), so Instagram does not rate-limit the account |
-| DOWNLOAD_DIR | โฟลเดอร์ดาวน์โหลดชั่วคราว |
-| SESSION_DIR | โฟลเดอร์เก็บ session (ค่าเริ่มต้น `./sessions`) |
+| DOWNLOAD_DIR | Folder for temporary downloads |
+| SESSION_DIR | Folder for the sessions (default `./sessions`) |
 
 ## Cookies
 
-วางไฟล์ไว้ในโฟลเดอร์หลักของบอท:
+Put these files in the bot's main folder:
 
-| ไฟล์ | ใช้สำหรับ |
-|------|-----------|
-| cookies_ig.txt | Instagram (จำเป็น) |
-| cookies_x.txt | X/Twitter (สำหรับบัญชี private) |
-| cookies_tiktok.txt | TikTok (ใช้เมื่อถูกบล็อก) |
+| File | Used for |
+|------|----------|
+| cookies_ig.txt | Instagram (required) |
+| cookies_x.txt | X/Twitter (for private accounts) |
+| cookies_tiktok.txt | TikTok (use it if you get blocked) |
 
-วิธี export: ติดตั้งส่วนขยาย [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) ใน Chrome → ล็อกอินเว็บนั้น → export แล้วบันทึกเป็นชื่อไฟล์ตามตาราง
+To export them, install the [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) extension in Chrome, log in to the site, export, and save the file under the name from the table.
 
-ไฟล์ cookies ให้สิทธิ์เข้าบัญชีของคุณ อย่าแชร์หรือ commit (`.gitignore` กันไว้ให้แล้ว)
+Cookie files give access to your accounts. Never share or commit them (`.gitignore` already excludes them).
 
-## วิธีใช้
+## Usage
 
-ส่งลิงก์หรือข้อความถึงบอทใน private chat เท่านั้น และเฉพาะผู้ใช้ที่อยู่ใน `ALLOWED_USER_IDS`:
+Send a link or text to the bot in a private chat. Only users listed in `ALLOWED_USER_IDS` are served.
 
-| ต้องการ | ตัวอย่าง |
-|---------|----------|
-| โคลนทั้งกลุ่ม/ช่อง | `https://t.me/username` · `username` · `-1001234567890` |
-| โคลนกลุ่ม/ช่องส่วนตัว | `https://t.me/c/1234567890` (user account ต้องเป็นสมาชิก) |
-| โคลนข้อความเดียว | `https://t.me/username/12345` · `https://t.me/c/1234567890/12345` |
-| X/Twitter | `https://x.com/user/status/123...` |
-| Instagram | A post, reel or story, e.g. `https://instagram.com/reel/xxxxx` (`/p/`, `/reels/`, `/share/` and `/<username>/reel/` links all work), or a profile: `https://instagram.com/username` — needs `cookies_ig.txt` |
-| TikTok | `https://tiktok.com/@user/video/123...` |
-| ส่งซ้ำลิงก์ที่เคยส่งแล้ว | `force https://x.com/user/status/123...` |
-| ยกเลิกงาน | `/cancel` (ทั้งหมด) หรือ `/cancel <ชื่องานที่แสดงใน /jobs>` |
-| ดูงานที่กำลังทำ | `/jobs` |
-| ตรวจสอบสถานะเครื่อง | `/ping` |
+| You want | Send |
+|----------|------|
+| Clone a whole group/channel | `https://t.me/username` · `username` · `-1001234567890` |
+| Clone a private group/channel | `https://t.me/c/1234567890` (your user account must be a member) |
+| Clone one message | `https://t.me/username/12345` · `https://t.me/c/1234567890/12345` |
+| An X/Twitter post | `https://x.com/user/status/123...` |
+| An Instagram post, reel or story | `https://instagram.com/reel/xxxxx` — `/p/`, `/reels/`, `/share/` and `/<username>/reel/` links all work |
+| An Instagram profile | `https://instagram.com/username` |
+| A TikTok video or photo post | `https://tiktok.com/@user/video/123...` |
+| Send a link that was already sent | `force https://x.com/user/status/123...` |
+| Cancel jobs | `/cancel` (all) or `/cancel <job name shown by /jobs>` |
+| List running jobs | `/jobs` |
+| Server status | `/ping` |
 
-ถ้าวางข้อความที่มีลิงก์ปนอยู่ บอทจะใช้ลิงก์แรกที่พบ
+Instagram needs `cookies_ig.txt`. If a message contains several links, the first one is used.
 
-## การทำงาน
+## How it works
 
-- ต้นทางที่ส่งต่อได้จะใช้โหมด forward ส่วนต้นทางที่ห้ามส่งต่อ (และแชทกับผู้ใช้) จะดาวน์โหลดแล้วอัปโหลดใหม่ ถ้า forward ข้อความใดไม่สำเร็จ บอทจะลองคัดลอกด้วยวิธีดาวน์โหลดแทน
-- ข้อความที่ส่งแล้วถูกจำไว้ใน `sent_media.json` (สำรองอัตโนมัติเป็น `.bak`) การรันซ้ำจึงข้ามของเดิม ลบไฟล์นี้หากต้องการเริ่มใหม่
-- งานโคลนกลุ่มที่ค้างอยู่ตอนปิดบอทจะทำต่อเองเมื่อเปิดใหม่ (งานที่สั่ง `/cancel` จะไม่ทำต่อ) งานลิงก์เดี่ยวและ X/Instagram/TikTok ไม่ทำต่อ
-- เมื่อโดน FloodWait บอทจะรอตามเวลาที่ Telegram กำหนดแล้วลองใหม่ให้อัตโนมัติ
+- **Telegram sources** are copied into a topic named after the source chat. Sources that allow forwarding use forward mode; sources that forbid it (and chats with users) are downloaded and uploaded again. If forwarding a message fails, the bot tries to copy it by download instead.
+- **X, Instagram and TikTok** posts go into a topic named after the poster's username (if the username can't be determined, into "X Downloads", "Instagram Downloads" or "TikTok Downloads"). Each post is sent as one album (up to 10 items; larger posts become several albums). TikTok photo posts are sent without the music track.
+- **Instagram profiles** are cloned newest post first, `PROFILE_MAX_POSTS` posts per run, with a pause of `PROFILE_POST_DELAY` seconds between posts. Every post that was sent is remembered, so sending the profile link again continues with older posts; `force <link>` starts over. The run stops after 3 failed posts in a row (usually expired cookies or Instagram limiting requests).
+- **Sent items are remembered** in `sent_media.json` (Telegram messages, with an automatic `.bak` backup) and `sent_urls.json` (X/Instagram/TikTok links), so running a source again skips what was already sent. Delete a file to start over.
+- **Cloning a chat can be resumed**: a job that was running when the bot stopped continues by itself on the next start (jobs stopped with `/cancel` do not). Single-message, X, Instagram and TikTok jobs are not resumed.
+- **FloodWait**: when Telegram asks the bot to wait, it waits as long as requested and retries automatically.
 
-## โครงสร้างโปรเจกต์
+## Project layout
 
-| ไฟล์ | หน้าที่ |
+| File | Purpose |
 |------|---------|
-| `main.py` | จุดเริ่มต้น ล็อกอิน และ resume งานที่ค้าง |
-| `handlers/` | รับข้อความและคำสั่งจากผู้ใช้ |
-| `jobs.py` | จัดการงานเบื้องหลัง (ติดตาม ยกเลิก แจ้ง error) |
-| `parsing.py` | แยกลิงก์และข้อความที่ผู้ใช้ส่งมา |
-| `worker/` | การโคลน การส่งสื่อ Topic และตัวดาวน์โหลด gallery-dl |
-| `db.py` | บันทึกข้อความที่ส่งแล้ว งานที่ค้าง และลิงก์ที่ส่งแล้ว |
+| `main.py` | Entry point: login, and resuming unfinished jobs |
+| `handlers/` | Receive messages and commands from users |
+| `jobs.py` | Background jobs (tracking, cancelling, error reports) |
+| `parsing.py` | Parsing the links and text users send |
+| `worker/` | Cloning, sending media, topics and the gallery-dl downloader |
+| `db.py` | Storage for sent messages, unfinished jobs and sent links |
 
-## การทดสอบ
+## Tests
 
 ```bash
 pip install -r requirements-dev.txt

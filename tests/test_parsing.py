@@ -21,7 +21,7 @@ def test_parse_tg_link(url, expected):
 
 
 def test_multiline_message_matches():
-    text = "ดูอันนี้\nhttps://x.com/a/status/1"
+    text = "caf\u00e9 \u2615\nhttps://x.com/a/status/1"
     m = MESSAGE_PATTERN.match(text)
     assert m and m.group(1) == text
 
@@ -37,7 +37,7 @@ def test_telethon_accepts_compiled_pattern():
 
 
 @pytest.mark.parametrize("text,expected", [
-    ("ดูอันนี้\nhttps://x.com/a/status/1 เจ๋งมาก", "https://x.com/a/status/1"),
+    ("look at this\nhttps://x.com/a/status/1 so good", "https://x.com/a/status/1"),
     ("(https://www.tiktok.com/@u/video/1).", "https://www.tiktok.com/@u/video/1"),
     ("durov", "durov"),
     ("  123456  ", "123456"),

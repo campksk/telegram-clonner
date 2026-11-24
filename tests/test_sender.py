@@ -1,7 +1,6 @@
 import asyncio
 import types
 
-import pytest
 
 from worker.sender import CAPTION_LIMIT, MESSAGE_LIMIT, pick_caption, send_media, split_text
 

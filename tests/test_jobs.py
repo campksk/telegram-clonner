@@ -78,7 +78,7 @@ def test_single_message_job_is_tracked_cancellable_and_not_silent(monkeypatch):
 
         dup = FakeEvent("https://t.me/cats_channel/55")
         await message.handle_message(dup)                                   # same link again -> refused
-        assert any("อยู่" in t for t in dup.texts) and len(calls) == 1
+        assert any("already being cloned" in t for t in dup.texts) and len(calls) == 1
 
         cancel = CancelEvent("msg_cats_channel_55")
         await system.handle_cancel(cancel)
@@ -154,7 +154,7 @@ def test_multiline_share_with_extra_text_reaches_the_right_url(monkeypatch):
     monkeypatch.setattr(message.worker, "clone_ig_media", fake_ig)
 
     async def run():
-        await message.handle_message(FakeEvent("น่ารักมาก\nhttps://www.instagram.com/reel/XYZ/?igsh=1\nขอบคุณ"))
+        await message.handle_message(FakeEvent("so cute \u2615\nhttps://www.instagram.com/reel/XYZ/?igsh=1\nthanks"))
         await drain()
 
     asyncio.run(run())

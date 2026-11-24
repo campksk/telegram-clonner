@@ -57,7 +57,7 @@ async def handle_message(event: events.NewMessage.Event):
     if is_instagram(arg):
         arg = canonical_instagram(arg)
 
-    status_msg = await event.reply(f"🚀 กำลังประมวลผล `{arg}`...")
+    status_msg = await event.reply(f"🚀 Processing `{arg}`...")
     async def status_cb(text: str):
         try: await status_msg.edit(text, parse_mode="md")
         except Exception: await event.respond(text, parse_mode="md")
@@ -68,7 +68,7 @@ async def handle_message(event: events.NewMessage.Event):
         chat_ref, msg_id = link_parsed
         key = f"msg_{chat_ref}_{msg_id}"
         if jobs.is_running(key):
-            await event.reply("⚠️ กำลัง clone ข้อความนี้อยู่")
+            await event.reply("⚠️ This message is already being cloned")
             return
         jobs.start_job(key, f"message `{msg_id}`", worker.clone_single_message(chat_ref, msg_id, status_cb), status_cb)
         return
@@ -109,6 +109,6 @@ async def handle_message(event: events.NewMessage.Event):
 
     key = str(arg)
     if jobs.is_running(key):
-        await event.reply(f"⚠️ `{arg}` กำลัง clone อยู่ พิมพ์ `/cancel` เพื่อหยุด")
+        await event.reply(f"⚠️ `{arg}` is already being cloned. Send `/cancel` to stop it")
         return
     jobs.start_group_job(key, source, status_cb)

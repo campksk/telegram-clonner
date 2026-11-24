@@ -1,45 +1,37 @@
-"""Guards against the garbled Thai (stacked tone marks) that used to fill the README."""
+"""Guards for the documentation and for the 'everything is in English' rule."""
 import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-
-# two tone marks in a row, the same combining mark twice, or a tone mark squeezed between two
-# 'mai han-akat' - none of these occur in correctly typed Thai
-STACKED = re.compile(
-    "([\u0E31\u0E34-\u0E3A\u0E47-\u0E4E])\\1"
-    "|[\u0E48-\u0E4B]{2}"
-    "|[\u0E48-\u0E4B]\u0E31[\u0E48-\u0E4B]"
-    "|\u0E31[\u0E48-\u0E4B]\u0E31"
-)
+SKIP_DIRS = {".git", "venv", "__pycache__", "sessions", "downloads", ".pytest_cache"}
+THAI = re.compile("[\u0E00-\u0E7F]")
 
 
 def text_files():
     for p in sorted(ROOT.rglob("*")):
-        if p.is_file() and not {".git", "venv", "__pycache__", "sessions", "downloads"} & set(p.parts) \
-                and (p.suffix in {".py", ".md", ".txt", ".sh"} or p.name == ".env.example"):
+        if p.is_file() and not SKIP_DIRS & set(p.parts) \
+                and (p.suffix in {".py", ".md", ".txt", ".sh", ".ini"} or p.name == ".env.example"):
             yield p
 
 
-def test_no_stacked_thai_marks_anywhere():
-    bad = {}
+def test_no_thai_text_left_in_the_project():
+    found = {}
     for p in text_files():
-        found = [m.group(0) for m in STACKED.finditer(p.read_text(encoding="utf-8", errors="ignore"))]
-        if found:
-            bad[str(p.relative_to(ROOT))] = len(found)
-    # this file contains the pattern on purpose
-    bad.pop("tests/test_docs.py", None)
-    assert not bad, f"garbled Thai text in: {bad}"
+        lines = [n for n, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1) if THAI.search(line)]
+        if lines:
+            found[str(p.relative_to(ROOT))] = lines[:5]
+    assert not found, f"Thai text found (lines): {found}"
 
 
 def test_readme_documents_every_setting():
-    import config  # noqa: F401  (settings live in config.py)
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    config_py = (ROOT / "config.py").read_text(encoding="utf-8")
     for name in ("API_ID", "API_HASH", "BOT_TOKEN", "DEST_GROUP_ID", "ALLOWED_USER_IDS", "SEND_DELAY",
                  "PARALLEL_WORKERS", "PRESERVE_ORDER", "MAX_SCAN_MESSAGES", "PROFILE_MAX_POSTS", "PROFILE_POST_DELAY",
                  "DOWNLOAD_DIR", "SESSION_DIR"):
         assert f"| {name} |" in readme, f"{name} missing from README"
-        assert name in (ROOT / "config.py").read_text(encoding="utf-8"), f"{name} not read by config.py"
+        assert name in config_py, f"{name} not read by config.py"
     example = (ROOT / ".env.example").read_text(encoding="utf-8")
-    for name in ("API_ID", "API_HASH", "BOT_TOKEN", "DEST_GROUP_ID", "ALLOWED_USER_IDS", "MAX_SCAN_MESSAGES"):
+    for name in ("API_ID", "API_HASH", "BOT_TOKEN", "DEST_GROUP_ID", "ALLOWED_USER_IDS", "MAX_SCAN_MESSAGES",
+                 "PROFILE_MAX_POSTS", "PROFILE_POST_DELAY"):
         assert re.search(rf"^{name}=", example, re.M), f"{name} missing from .env.example"

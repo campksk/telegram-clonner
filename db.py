@@ -36,7 +36,7 @@ def load_sent() -> None:
         return
     try:
         _sent_db = _read_sent(SENT_DB_PATH)
-        log.info(f"โหลด sent_db สำเร็จ ({sum(len(v) for v in _sent_db.values())} records)")
+        log.info(f"Loaded sent_db ({sum(len(v) for v in _sent_db.values())} records)")
         return
     except Exception as e:
         log.error(f"{SENT_DB_PATH.name} is unreadable ({e})")
@@ -92,7 +92,7 @@ async def save_sent() -> None:
         # leaves the previous file intact (write to a temp file, then atomic replace).
         _write_atomic(SENT_DB_PATH, data)
     except Exception as e:
-        log.error(f"บันทึก sent_db ล้มเหลว: {e}")
+        log.error(f"Failed to save sent_db: {e}")
 
 
 def get_sent(src_key: str) -> set[int]:
@@ -126,7 +126,7 @@ def load_sent_urls() -> None:
     try:
         raw = json.loads(URLS_DB_PATH.read_text(encoding="utf-8"))
         _sent_urls = set(raw.get("urls", []))
-        log.info(f"โหลด sent_urls สำเร็จ ({len(_sent_urls)} urls)")
+        log.info(f"Loaded sent_urls ({len(_sent_urls)} urls)")
     except Exception:
         _sent_urls = set()
 
@@ -141,7 +141,7 @@ async def mark_url_sent(url: str) -> None:
         data = json.dumps({"urls": sorted(_sent_urls)}, ensure_ascii=False)
         _write_atomic(URLS_DB_PATH, data)
     except Exception as e:
-        log.error(f"บันทึก sent_urls ล้มเหลว: {e}")
+        log.error(f"Failed to save sent_urls: {e}")
 
 
 # --- Pending jobs ---
