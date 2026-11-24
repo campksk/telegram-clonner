@@ -93,6 +93,65 @@ async def _run_gallery_dl(url: str, job_dir: Path, extra_args: list[str]) -> tup
     return True, ""
 
 
+PROFILE_LIST_TIMEOUT = 600  # seconds allowed for listing the posts of a profile
+
+
+async def stream_gallery_dl_print(url: str, extra_args: list[str], fmt: str, on_line, timeout: float = PROFILE_LIST_TIMEOUT) -> tuple[bool, str]:
+    """Run gallery-dl in print mode (-N: nothing is downloaded) and hand each output line to `on_line`.
+
+    `on_line(line) -> bool`; returning True means "I have enough": gallery-dl is stopped right away,
+    so listing the newest posts of a huge profile doesn't walk through the whole profile.
+    Returns (ok, error). ok is True if the output ended normally or `on_line` stopped it.
+    """
+    try:
+        cmd = _gallery_dl_cmd() + ["-N", fmt] + extra_args + [url]
+    except RuntimeError as e:
+        return False, str(e)
+
+    process = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},  # deliver lines as they are produced, not in blocks
+    )
+    err_tail = bytearray()
+
+    async def drain_stderr():
+        while True:
+            chunk = await process.stderr.read(4096)
+            if not chunk:
+                return
+            err_tail.extend(chunk)
+            del err_tail[:-8192]
+
+    drain = asyncio.create_task(drain_stderr())
+    stopped_early = False
+
+    async def read_stdout():
+        nonlocal stopped_early
+        while True:
+            raw = await process.stdout.readline()
+            if not raw:
+                return
+            if on_line(raw.decode("utf-8", "replace").rstrip("\r\n")):
+                stopped_early = True
+                return
+
+    try:
+        await asyncio.wait_for(read_stdout(), timeout)
+    except asyncio.TimeoutError:
+        return False, f"gallery-dl timeout ({timeout}s)"
+    finally:  # also on cancel: never leave gallery-dl running
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+        await asyncio.gather(drain, return_exceptions=True)
+
+    if stopped_early:
+        return True, ""
+    if process.returncode != 0:
+        return False, err_tail.decode("utf-8", "replace").strip()[-500:]
+    return True, ""
+
+
 @dataclass
 class Post:
     """The media files of one post, and the account that posted it (None if unknown)."""

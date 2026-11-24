@@ -27,6 +27,8 @@ cp .env.example .env   # แล้วแก้ค่าใน .env ให้ค�
 | PARALLEL_WORKERS | จำนวน worker ที่ทำงานพร้อมกัน ค่าเริ่มต้น 3 |
 | PRESERVE_ORDER | `1` = ส่งตามลำดับข้อความเดิมเสมอ (ค่าเริ่มต้น) · `0` = เร็วกว่า แต่ลำดับอาจสลับ (โดยเฉพาะโหมด forward) |
 | MAX_SCAN_MESSAGES | จำนวนสื่อใหม่สูงสุดต่อการรัน 1 ครั้ง (ค่าเริ่มต้น 10000) ส่งลิงก์เดิมซ้ำเพื่อทำต่อ |
+| PROFILE_MAX_POSTS | New Instagram profile posts per run (default 20). Send the profile link again to continue with older posts |
+| PROFILE_POST_DELAY | Seconds to pause between profile posts (default 3), so Instagram does not rate-limit the account |
 | DOWNLOAD_DIR | โฟลเดอร์ดาวน์โหลดชั่วคราว |
 | SESSION_DIR | โฟลเดอร์เก็บ session (ค่าเริ่มต้น `./sessions`) |
 
@@ -54,7 +56,7 @@ cp .env.example .env   # แล้วแก้ค่าใน .env ให้ค�
 | โคลนกลุ่ม/ช่องส่วนตัว | `https://t.me/c/1234567890` (user account ต้องเป็นสมาชิก) |
 | โคลนข้อความเดียว | `https://t.me/username/12345` · `https://t.me/c/1234567890/12345` |
 | X/Twitter | `https://x.com/user/status/123...` |
-| Instagram | โพสต์ รีล หรือสตอรี่ เช่น `https://instagram.com/reel/xxxxx` (ลิงก์ `/p/` `/reels/` `/share/` และ `/<username>/reel/` ใช้ได้ทั้งหมด ต้องมี `cookies_ig.txt` และไม่รองรับหน้าโปรไฟล์) |
+| Instagram | A post, reel or story, e.g. `https://instagram.com/reel/xxxxx` (`/p/`, `/reels/`, `/share/` and `/<username>/reel/` links all work), or a profile: `https://instagram.com/username` — needs `cookies_ig.txt` |
 | TikTok | `https://tiktok.com/@user/video/123...` |
 | ส่งซ้ำลิงก์ที่เคยส่งแล้ว | `force https://x.com/user/status/123...` |
 | ยกเลิกงาน | `/cancel` (ทั้งหมด) หรือ `/cancel <ชื่องานที่แสดงใน /jobs>` |

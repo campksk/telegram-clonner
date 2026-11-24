@@ -8,8 +8,8 @@ import jobs
 import worker
 from config import bot_client, is_allowed
 from parsing import (
-    IG_POST_RE, MESSAGE_PATTERN, canonical_instagram, extract_target, is_instagram, normalize_url,
-    parse_source, parse_tg_link, wants_force,
+    IG_POST_RE, MESSAGE_PATTERN, canonical_instagram, extract_target, instagram_profile, is_instagram,
+    normalize_url, parse_source, parse_tg_link, wants_force,
 )
 
 log = logging.getLogger("clone-bot.message")
@@ -18,17 +18,25 @@ X_RE = re.compile(r"https?://(?:www\.)?(?:twitter\.com|x\.com)/([^/]+)/status/(\
 TIKTOK_RE = re.compile(r"https?://(?:www\.|vm\.|vt\.)?tiktok\.com/\S+")
 
 
-def _site_job(arg: str):
-    """-> (task_key, label, clone function) for X / Instagram / TikTok links, else None."""
+def _site_job(arg: str, force: bool):
+    """Which download job a link belongs to, or None.
+
+    -> (task key, label, run(status_cb) -> coroutine, dedup). `dedup` is False for jobs that are never
+    "done" (a profile can always have older posts left), so their link is never refused as a duplicate.
+    """
     m = X_RE.search(arg)
     if m:
-        return f"x_{m.group(2)}", "X", worker.clone_x_media
+        return f"x_{m.group(2)}", "X", lambda cb: worker.clone_x_media(arg, cb), True
     m = IG_POST_RE.search(arg)
     if m:
-        return f"ig_{m.group(1)}", "Instagram", worker.clone_ig_media
+        return f"ig_{m.group(1)}", "Instagram", lambda cb: worker.clone_ig_media(arg, cb), True
+    username = instagram_profile(arg)
+    if username:
+        return (f"igprofile_{username.lower()}", "Instagram profile",
+                lambda cb: worker.clone_ig_profile(username, cb, force=force), False)
     if TIKTOK_RE.search(arg):
         digest = hashlib.md5(normalize_url(arg).encode()).hexdigest()[:12]
-        return f"tiktok_{digest}", "TikTok", worker.clone_tiktok_media
+        return f"tiktok_{digest}", "TikTok", lambda cb: worker.clone_tiktok_media(arg, cb), True
     return None
 
 
@@ -66,27 +74,31 @@ async def handle_message(event: events.NewMessage.Event):
         return
 
     # --- X / Instagram / TikTok ---
-    site = _site_job(arg)
+    site = _site_job(arg, wants_force(raw))
     if site:
-        key, label, clone = site
+        key, label, run, dedup = site
         if jobs.is_running(key):
-            await event.reply(f"⚠️ กำลังโหลดลิงก์ {label} นี้อยู่...")
+            await event.reply(f"⚠️ This {label} link is already being downloaded...")
             return
-        norm = normalize_url(arg)
-        sent = db.get_sent_urls()
-        if not wants_force(raw) and (norm in sent or arg in sent):
-            await status_cb(f"ℹ️ Already sent before: `{arg}`\nSend `force {arg}` to send it again")
-            return
+        on_success = None
+        if dedup:
+            norm = normalize_url(arg)
+            sent = db.get_sent_urls()
+            if not wants_force(raw) and (norm in sent or arg in sent):
+                await status_cb(f"ℹ️ Already sent before: `{arg}`\nSend `force {arg}` to send it again")
+                return
 
-        async def mark_sent():
-            await db.mark_url_sent(norm)
+            async def mark_sent():
+                await db.mark_url_sent(norm)
 
-        jobs.start_job(key, f"{label} download", clone(arg, status_cb), status_cb, on_success=mark_sent)
+            on_success = mark_sent
+
+        jobs.start_job(key, f"{label} download", run(status_cb), status_cb, on_success=on_success)
         return
 
-    # --- an Instagram link we can't download (profile, explore, ...) ---
+    # --- an Instagram link we can't download (explore, tags, ...) ---
     if is_instagram(arg):
-        await status_cb(f"⚠️ Instagram link not supported: `{arg}`\nSend a link to a post, reel or story (profile pages aren't supported)")
+        await status_cb(f"⚠️ Instagram link not supported: `{arg}`\nSend a link to a post, reel, story or profile")
         return
 
     # --- whole group / channel / user ---

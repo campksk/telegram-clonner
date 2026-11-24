@@ -288,8 +288,9 @@ def test_instagram_links_are_downloaded(monkeypatch, sent, expected_url):
 
 
 @pytest.mark.parametrize("sent", [
-    "https://www.instagram.com/someuser/",
     "https://www.instagram.com/explore/tags/cats/",
+    "https://www.instagram.com/accounts/login/",
+    "https://www.instagram.com/",
 ])
 def test_unsupported_instagram_links_get_a_clear_message(monkeypatch, sent):
     called = []
@@ -308,7 +309,7 @@ def test_unsupported_instagram_links_get_a_clear_message(monkeypatch, sent):
 
     ev = asyncio.run(run())
     assert called == []
-    assert any("Instagram link not supported" in t and "post, reel or story" in t for t in ev.texts)
+    assert any("Instagram link not supported" in t and "post, reel, story or profile" in t for t in ev.texts)
     assert not any("not recognized" in t for t in ev.texts)         # the old, confusing message
 
 

@@ -1,12 +1,16 @@
+import asyncio
+import re
 import shutil
 import logging
 import tempfile
 from pathlib import Path
 from typing import Callable, Awaitable
 
-from config import DOWNLOAD_DIR
+import db
+from config import DOWNLOAD_DIR, PROFILE_MAX_POSTS, PROFILE_POST_DELAY
+from parsing import normalize_url
 
-from worker.gallery import _cookie_args, _run_gallery_dl, collect_posts, site_args, upload_to_group
+from worker.gallery import _cookie_args, _run_gallery_dl, collect_posts, site_args, stream_gallery_dl_print, upload_to_group
 from worker.topics import get_or_create_topic
 
 log = logging.getLogger("clone-bot.worker.media_sites")
@@ -107,3 +111,87 @@ async def clone_tiktok_media(url: str, status_cb: StatusCb) -> bool:
         fail_hint="\n\n💡 If blocked, place a `cookies_tiktok.txt` file in the bot folder",
         hint_only_without_cookies=True,
     )
+
+
+# Real posts only (stories and highlights are not part of a profile's post list)
+_POST_URL_RE = re.compile(r"https?://(?:www\.)?instagram\.com/(?:[^/?#]+/)?(?:p|reels?|tv)/([^/?#]+)")
+MAX_FAILED_IN_A_ROW = 3
+
+
+async def clone_ig_profile(username: str, status_cb: StatusCb, *, force: bool = False) -> bool:
+    """Download the posts of an Instagram profile, newest first, each into the topic named after the user.
+
+    At most PROFILE_MAX_POSTS posts that were not sent before are taken per run, and every post that
+    went through is remembered, so sending the profile link again continues with older posts.
+    `force` ignores what was sent before. Returns True if the run did what it should (including
+    "nothing new").
+    """
+    cookies = _cookie_args("ig")
+    if not cookies:
+        await status_cb("❌ Download failed: `cookies_ig.txt` not found\n💡 Cookies are required for Instagram")
+        return False
+    await status_cb(f"🔍 Instagram profile @{username} detected\n📋 Looking for posts...")
+
+    already_sent = set() if force else set(db.get_sent_urls())
+    limit = max(1, PROFILE_MAX_POSTS)
+    new_posts: list[str] = []
+    seen: set[str] = set()
+    skipped = 0
+
+    def on_line(line: str) -> bool:
+        nonlocal skipped
+        m = _POST_URL_RE.search(line)
+        if not m or m.group(1) in seen:
+            return False  # not a post line, or another picture of a post we already know
+        code = m.group(1)
+        seen.add(code)
+        post_url = f"https://www.instagram.com/p/{code}/"
+        if normalize_url(post_url) in already_sent:
+            skipped += 1
+            return False
+        new_posts.append(post_url)
+        return len(new_posts) >= limit  # enough: stop listing
+
+    ok, err = await stream_gallery_dl_print(f"https://www.instagram.com/{username}/", cookies, "{post_url}", on_line)
+    if not ok and not new_posts:
+        hint = "\n\n💡 Cookies may have expired, or the account is private/does not exist" if "timeout" not in err else ""
+        await status_cb(f"❌ Could not list the posts of @{username}:\n`{err}`{hint}")
+        return False
+    if not new_posts:
+        await status_cb(f"✅ @{username}: nothing new — all {skipped} posts were already sent\n(use `force <link>` to send them again)")
+        return True
+    more_may_exist = len(new_posts) >= limit or not ok
+
+    done = failed = in_a_row = 0
+    last_error = ""
+
+    async def quiet(text: str):  # per-post messages would drown the progress line; keep the last error
+        nonlocal last_error
+        if text.startswith("❌") or text.startswith("⚠️"):
+            last_error = text
+
+    aborted = False
+    for i, post_url in enumerate(new_posts, 1):
+        await status_cb(f"📥 @{username}: post {i}/{len(new_posts)}\n• Sent: {done} • Failed: {failed}")
+        if await clone_ig_media(post_url, quiet):
+            await db.mark_url_sent(normalize_url(post_url))
+            done += 1
+            in_a_row = 0
+        else:
+            failed += 1
+            in_a_row += 1
+            if in_a_row >= MAX_FAILED_IN_A_ROW:
+                aborted = True
+                break
+        if i < len(new_posts):
+            await asyncio.sleep(PROFILE_POST_DELAY)
+
+    lines = [f"{'⛔' if aborted else '✅'} Profile @{username}: {done} posts sent, {failed} failed"]
+    if aborted:
+        lines.append(f"Stopped after {MAX_FAILED_IN_A_ROW} failed posts in a row (expired cookies or Instagram limiting requests?)")
+        if last_error:
+            lines.append(last_error)
+    elif more_may_exist:
+        lines.append(f"There may be more posts — send the profile link again to continue with older ones ({limit} per run)")
+    await status_cb("\n".join(lines))
+    return done > 0

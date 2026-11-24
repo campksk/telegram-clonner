@@ -29,6 +29,23 @@ IG_POST_RE = re.compile(
 _IG_HOST_RE = re.compile(r"^https?://(?:(?:www|m)\.)?(?:instagram\.com|instagr\.am)(?=[/?#]|$)", re.I)
 
 
+# First path segments of instagram.com that are not user names
+_IG_RESERVED = {
+    "p", "reel", "reels", "tv", "stories", "share", "explore", "accounts", "direct", "tags", "about", "legal",
+    "developer", "web", "challenge", "locations", "topics", "emails", "session", "oauth", "directory",
+    "privacy", "terms", "api", "graphql", "static", "ar", "nametag", "download", "lite", "fxcal",
+}
+_IG_PROFILE_RE = re.compile(r"^https?://(?:www\.)?instagram\.com/([A-Za-z0-9._]{1,30})/?(?:[?#].*)?$")
+
+
+def instagram_profile(url: str) -> str | None:
+    """The user name if `url` is a plain Instagram profile link (instagram.com/<user>/), else None."""
+    m = _IG_PROFILE_RE.match(url)
+    if not m or m.group(1).lower() in _IG_RESERVED:
+        return None
+    return m.group(1)
+
+
 def is_instagram(url: str) -> bool:
     return bool(_IG_HOST_RE.match(url))
 

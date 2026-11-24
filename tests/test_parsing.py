@@ -1,7 +1,7 @@
 import pytest
 
-from parsing import (IG_POST_RE, MESSAGE_PATTERN, canonical_instagram, extract_target, is_instagram, normalize_url,
-                     parse_source, parse_tg_link, wants_force)
+from parsing import (IG_POST_RE, MESSAGE_PATTERN, canonical_instagram, extract_target, instagram_profile,
+                     is_instagram, normalize_url, parse_source, parse_tg_link, wants_force)
 
 
 @pytest.mark.parametrize("url,expected", [
@@ -152,3 +152,30 @@ def test_one_instagram_post_has_one_dedup_key_whatever_the_link_style():
     assert keys == {"https://instagram.com/p/CxAb"}
     assert normalize_url("https://www.instagram.com/p/CxAb/") != normalize_url("https://www.instagram.com/p/CxAc/")
     assert normalize_url("https://www.instagram.com/stories/u/1/") == "https://instagram.com/stories/u/1"
+
+
+# ---------- Instagram profile links ----------
+
+@pytest.mark.parametrize("url,user", [
+    ("https://www.instagram.com/someuser/", "someuser"),
+    ("https://www.instagram.com/someuser", "someuser"),
+    ("https://www.instagram.com/some.user_1/?hl=en", "some.user_1"),
+    ("https://instagram.com/SomeUser/#top", "SomeUser"),
+])
+def test_instagram_profile_links(url, user):
+    assert instagram_profile(url) == user
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.instagram.com/",
+    "https://www.instagram.com/p/CxAb/",                  # a post
+    "https://www.instagram.com/someuser/reel/CxAb/",      # a post
+    "https://www.instagram.com/explore/",                 # reserved names are not users
+    "https://www.instagram.com/accounts/login/",
+    "https://www.instagram.com/reels/",
+    "https://www.instagram.com/stories/someuser/123/",
+    "https://example.com/someuser/",
+    "https://www.instagram.com/" + "a" * 31 + "/",         # longer than a user name can be
+])
+def test_not_an_instagram_profile(url):
+    assert instagram_profile(url) is None

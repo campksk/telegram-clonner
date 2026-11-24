@@ -23,6 +23,10 @@ SEND_DELAY    = float(os.getenv("SEND_DELAY", "1.5"))
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "3"))
 # Send in the original message order even with several workers (downloads still overlap).
 PRESERVE_ORDER = os.getenv("PRESERVE_ORDER", "1").strip().lower() not in ("0", "false", "no", "off")
+# Cloning a whole Instagram profile: new posts per run (send the link again to continue) and the pause
+# between posts, which keeps Instagram from rate-limiting the account.
+PROFILE_MAX_POSTS = int(os.getenv("PROFILE_MAX_POSTS", "20"))
+PROFILE_POST_DELAY = float(os.getenv("PROFILE_POST_DELAY", "3"))
 MAX_SCAN_MESSAGES = int(os.getenv("MAX_SCAN_MESSAGES", "10000"))
 ALLOWED_USERS = set(int(x.strip()) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip())
 

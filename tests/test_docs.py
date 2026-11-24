@@ -36,7 +36,8 @@ def test_readme_documents_every_setting():
     import config  # noqa: F401  (settings live in config.py)
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     for name in ("API_ID", "API_HASH", "BOT_TOKEN", "DEST_GROUP_ID", "ALLOWED_USER_IDS", "SEND_DELAY",
-                 "PARALLEL_WORKERS", "PRESERVE_ORDER", "MAX_SCAN_MESSAGES", "DOWNLOAD_DIR", "SESSION_DIR"):
+                 "PARALLEL_WORKERS", "PRESERVE_ORDER", "MAX_SCAN_MESSAGES", "PROFILE_MAX_POSTS", "PROFILE_POST_DELAY",
+                 "DOWNLOAD_DIR", "SESSION_DIR"):
         assert f"| {name} |" in readme, f"{name} missing from README"
         assert name in (ROOT / "config.py").read_text(encoding="utf-8"), f"{name} not read by config.py"
     example = (ROOT / ".env.example").read_text(encoding="utf-8")
