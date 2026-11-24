@@ -176,3 +176,72 @@ def test_real_gallery_dl_puts_each_post_in_its_own_username_directory(tmp_path):
         assert "/anna/98765/" in posts[0].files[0]
     finally:
         server.shutdown()
+
+
+# ---------- topic named after the poster's username ----------
+
+@pytest.fixture
+def topics_env(env, monkeypatch):
+    """env + a get_or_create_topic that hands out ids and remembers which titles were asked for."""
+    asked = {}
+
+    async def topic(title):
+        return asked.setdefault(title.lower(), 100 + len(asked))
+
+    monkeypatch.setattr(media_sites, "get_or_create_topic", topic)
+    return env, asked
+
+
+@pytest.mark.parametrize("clone,url,fallback", [
+    (media_sites.clone_tiktok_media, "https://www.tiktok.com/@someuser/photo/750001", "TikTok Downloads"),
+    (media_sites.clone_ig_media, "https://www.instagram.com/p/AAA/", "Instagram Downloads"),
+    (media_sites.clone_x_media, "https://x.com/someuser/status/1", "X Downloads"),
+])
+def test_every_site_posts_into_a_topic_named_after_the_username(topics_env, monkeypatch, clone, url, fallback):
+    client, asked = topics_env
+    statuses = []
+
+    async def status(t):
+        statuses.append(t)
+
+    monkeypatch.setattr(media_sites, "_run_gallery_dl", fake_runner([], lambda d: touch(d, "c/someuser/1/a.jpg")))
+    assert asyncio.run(clone(url, status)) is True
+    assert list(asked) == ["someuser"]                    # not "TikTok Downloads" & co
+    assert client.reply_tos == [100]
+    assert any("Topic: **someuser**" in t for t in statuses)
+
+
+def test_posts_of_different_users_go_to_their_own_topics_in_order(topics_env, monkeypatch):
+    client, asked = topics_env
+
+    def writer(d):
+        touch(d, "tiktok/anna/1/1_01.jpeg")
+        touch(d, "tiktok/anna/1/1_02.jpeg")
+        touch(d, "tiktok/bob/2/2_01.jpeg")
+
+    monkeypatch.setattr(media_sites, "_run_gallery_dl", fake_runner([], writer))
+    assert asyncio.run(media_sites.clone_tiktok_media("https://www.tiktok.com/@anna", noop)) is True
+    assert list(asked) == ["anna", "bob"]
+    assert client.reply_tos == [100, 101]                 # anna's album, then bob's single file
+
+
+def test_usernames_that_differ_only_by_case_share_one_topic(topics_env, monkeypatch):
+    client, asked = topics_env
+    monkeypatch.setattr(media_sites, "_run_gallery_dl",
+                        fake_runner([], lambda d: (touch(d, "c/Anna/1/a.jpg"), touch(d, "c/anna/2/b.jpg"))))
+    asyncio.run(media_sites.clone_ig_media("https://www.instagram.com/p/A/", noop))
+    assert len(asked) == 1 and client.reply_tos == [100, 100]
+
+
+def test_unknown_username_falls_back_to_the_site_topic(topics_env, monkeypatch):
+    client, asked = topics_env
+    monkeypatch.setattr(media_sites, "_run_gallery_dl", fake_runner([], lambda d: touch(d, "a.jpg")))
+    assert asyncio.run(media_sites.clone_tiktok_media("https://www.tiktok.com/@x/video/1", noop)) is True
+    assert list(asked) == ["tiktok downloads"]
+
+
+def test_topic_title_is_cleaned_and_capped():
+    assert media_sites._topic_title("  anna\n", "X") == "anna"
+    assert media_sites._topic_title("a" * 300, "X") == "a" * 128
+    assert media_sites._topic_title("", "Instagram Downloads") == "Instagram Downloads"
+    assert media_sites._topic_title(None, "X Downloads") == "X Downloads"

@@ -155,16 +155,18 @@ def album_batches(files: list[str]) -> list[list[str]]:
     return [group[i:i + ALBUM_LIMIT] for group in (visual, rest) for i in range(0, len(group), ALBUM_LIMIT)]
 
 
-async def upload_to_group(posts: list[Post], thread_id: int, site_name: str, status_cb: StatusCb, cleanup_dir: Path | None = None) -> bool:
+async def upload_to_group(posts: list[Post], topics: dict[str | None, tuple[int, str]], site_name: str, status_cb: StatusCb, cleanup_dir: Path | None = None) -> bool:
     """Upload downloaded posts to the Telegram group, each post as its own album(s).
 
-    Returns True only if at least one file was actually sent.
+    `topics` maps a post's username to (topic id, topic title); every post goes to the topic of its
+    poster. Returns True only if at least one file was actually sent.
     """
     total_files = sum(len(post.files) for post in posts)
     sent_files = 0
     dest_entity = await user_client.get_entity(DEST_GROUP_ID)
     try:
         for post in posts:
+            thread_id = topics[post.username][0]
             for batch in album_batches(post.files):
                 try:
                     if len(batch) == 1:
@@ -192,5 +194,6 @@ async def upload_to_group(posts: list[Post], thread_id: int, site_name: str, sta
     if sent_files == 0:
         await status_cb(f"❌ Failed to upload any file from {site_name}")
         return False
-    await status_cb(f"✅ Files from {site_name} sent successfully!\n• Topic: **{site_name} Downloads**\n• Count: {sent_files}/{total_files} files")
+    titles = ", ".join(f"**{title}**" for _, title in dict.fromkeys(topics[post.username] for post in posts))
+    await status_cb(f"✅ Files from {site_name} sent successfully!\n• Topic: {titles}\n• Count: {sent_files}/{total_files} files")
     return True

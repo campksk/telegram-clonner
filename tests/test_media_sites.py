@@ -14,11 +14,13 @@ class FakeClient:
         self.fail_files = set(fail_files)
         self.fail_albums = fail_albums
         self.album_calls = self.single_calls = 0
+        self.reply_tos = []
 
     async def get_entity(self, ref):
         return types.SimpleNamespace(id=999)
 
     async def send_file(self, dest, file=None, caption=None, reply_to=None, parse_mode=None):
+        self.reply_tos.append(reply_to)
         if isinstance(file, list):
             self.album_calls += 1
             if self.fail_albums:

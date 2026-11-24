@@ -13,6 +13,12 @@ log = logging.getLogger("clone-bot.worker.media_sites")
 StatusCb = Callable[[str], Awaitable[None]]
 
 
+def _topic_title(username: str | None, fallback: str) -> str:
+    """Topic name for a poster: their username (Telegram allows up to 128 characters)."""
+    title = "".join(ch for ch in (username or "") if ch.isprintable()).strip()[:128]
+    return title or fallback
+
+
 def _new_job_dir(prefix: str) -> Path:
     """A fresh, unique download directory, so two jobs can never share (or delete) each other's files."""
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -59,12 +65,16 @@ async def _clone_with_gallery_dl(
 
         total_files = sum(len(post.files) for post in posts)
         await status_cb(f"✅ Downloaded {total_files} files\n📤 Uploading to group...")
+        # One topic per poster, named after their username; if the username is unknown, the site's topic.
+        topics: dict[str | None, tuple[int, str]] = {}
         try:
-            thread_id = await get_or_create_topic(topic_name)
+            for username in dict.fromkeys(post.username for post in posts):
+                title = _topic_title(username, topic_name)
+                topics[username] = (await get_or_create_topic(title), title)
         except Exception as e:
             await status_cb(f"❌ Failed to create/find topic: `{e}`")
             return False
-        return await upload_to_group(posts, thread_id, upload_name, status_cb)
+        return await upload_to_group(posts, topics, upload_name, status_cb)
     finally:
         shutil.rmtree(job_dir, ignore_errors=True)
 
