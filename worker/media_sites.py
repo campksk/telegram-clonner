@@ -6,7 +6,7 @@ from typing import Callable, Awaitable
 
 from config import DOWNLOAD_DIR
 
-from worker.gallery import _cookie_args, _run_gallery_dl, collect_files_grouped, upload_to_group
+from worker.gallery import _cookie_args, _run_gallery_dl, collect_posts, site_args, upload_to_group
 from worker.topics import get_or_create_topic
 
 log = logging.getLogger("clone-bot.worker.media_sites")
@@ -46,25 +46,25 @@ async def _clone_with_gallery_dl(
 
     job_dir = _new_job_dir(job_prefix)
     try:
-        ok, err = await _run_gallery_dl(url, job_dir, cookies)
+        ok, err = await _run_gallery_dl(url, job_dir, cookies + site_args(site_key))
         if not ok:
             hint = fail_hint if (fail_hint and not (hint_only_without_cookies and cookies)) else ""
             await status_cb(f"❌ {label} download failed:\n`{err}`{hint}")
             return False
 
-        paths = collect_files_grouped(job_dir)
-        if not paths:
+        posts = collect_posts(job_dir)
+        if not posts:
             await status_cb(empty_msg)
             return False
 
-        total_files = sum(len(g) for g in paths)
+        total_files = sum(len(post.files) for post in posts)
         await status_cb(f"✅ Downloaded {total_files} files\n📤 Uploading to group...")
         try:
             thread_id = await get_or_create_topic(topic_name)
         except Exception as e:
             await status_cb(f"❌ Failed to create/find topic: `{e}`")
             return False
-        return await upload_to_group(paths, thread_id, upload_name, status_cb)
+        return await upload_to_group(posts, thread_id, upload_name, status_cb)
     finally:
         shutil.rmtree(job_dir, ignore_errors=True)
 

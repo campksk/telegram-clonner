@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 import types
 
@@ -12,16 +13,22 @@ class FakeClient:
         self.sent = []
         self.fail_files = set(fail_files)
         self.fail_albums = fail_albums
+        self.album_calls = self.single_calls = 0
 
     async def get_entity(self, ref):
         return types.SimpleNamespace(id=999)
 
     async def send_file(self, dest, file=None, caption=None, reply_to=None, parse_mode=None):
         if isinstance(file, list):
+            self.album_calls += 1
             if self.fail_albums:
                 raise RuntimeError("album failed")
+            visual = {os.path.splitext(f)[1].lower() in gallery.PHOTO_EXTS | gallery.VIDEO_EXTS for f in file}
+            if len(visual) > 1:
+                raise RuntimeError("MEDIA_INVALID: an album can't mix photos with other files")
             self.sent.extend(file)
         else:
+            self.single_calls += 1
             if file in self.fail_files or "ALL" in self.fail_files:
                 raise RuntimeError("file failed")
             self.sent.append(file)
@@ -43,8 +50,8 @@ def fake_gallery_dl(dirs, files_per_post=(2,)):
     async def run(url, job_dir, cookies):
         dirs.append(job_dir)
         for n, count in enumerate(files_per_post):
-            d = job_dir / f"post{n}"
-            d.mkdir()
+            d = job_dir / "site" / "someuser" / f"{1000 + n}"
+            d.mkdir(parents=True)
             for k in range(count):
                 (d / f"{k:03d}.jpg").write_bytes(b"x" * 2048)
         await asyncio.sleep(0.05)
