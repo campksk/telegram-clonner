@@ -118,5 +118,5 @@ def normalize_url(url: str) -> str:
 
 
 def wants_force(text: str) -> bool:
-    """True if the user prefixed/suffixed the link with the word 'force' (re-send a link already sent)."""
+    """True if the message contains the word 'force' (an Instagram profile then starts over, ignoring posts already sent)."""
     return bool(re.search(r"(?i)(?:^|\s)force(?:\s|$)", text or ""))

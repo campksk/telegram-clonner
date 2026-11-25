@@ -59,7 +59,7 @@ Send a link or text to the bot in a private chat. Only users listed in `ALLOWED_
 | An Instagram post, reel or story | `https://instagram.com/reel/xxxxx` — `/p/`, `/reels/`, `/share/` and `/<username>/reel/` links all work |
 | An Instagram profile | `https://instagram.com/username` |
 | A TikTok video or photo post | `https://tiktok.com/@user/video/123...` |
-| Send a link that was already sent | `force https://x.com/user/status/123...` |
+| Start an Instagram profile over from its newest post | `force https://instagram.com/username` |
 | Cancel jobs | `/cancel` (all) or `/cancel <job name shown by /jobs>` |
 | List running jobs | `/jobs` |
 | Server status | `/ping` |
@@ -71,7 +71,7 @@ Instagram needs `cookies_ig.txt`. If a message contains several links, the first
 - **Telegram sources** are copied into a topic named after the source chat. Sources that allow forwarding use forward mode; sources that forbid it (and chats with users) are downloaded and uploaded again. If forwarding a message fails, the bot tries to copy it by download instead.
 - **X, Instagram and TikTok** posts go into a topic named after the poster's username (if the username can't be determined, into "X Downloads", "Instagram Downloads" or "TikTok Downloads"). Each post is sent as one album (up to 10 items; larger posts become several albums). TikTok photo posts are sent without the music track.
 - **Instagram profiles** are cloned newest post first, `PROFILE_MAX_POSTS` posts per run, with a pause of `PROFILE_POST_DELAY` seconds between posts. Every post that was sent is remembered, so sending the profile link again continues with older posts; `force <link>` starts over. The run stops after 3 failed posts in a row (usually expired cookies or Instagram limiting requests).
-- **Sent items are remembered** in `sent_media.json` (Telegram messages, with an automatic `.bak` backup) and `sent_urls.json` (X/Instagram/TikTok links), so running a source again skips what was already sent. Delete a file to start over.
+- **Sent items are remembered** in `sent_media.json` (Telegram messages, with an automatic `.bak` backup) and `sent_urls.json` (Instagram posts, so that a profile run skips posts that were already sent). Running a Telegram source again skips what was already copied. Delete a file to start over. Links to single X, Instagram or TikTok posts can always be sent again.
 - **Cloning a chat can be resumed**: a job that was running when the bot stopped continues by itself on the next start (jobs stopped with `/cancel` do not). Single-message, X, Instagram and TikTok jobs are not resumed.
 - **FloodWait**: when Telegram asks the bot to wait, it waits as long as requested and retries automatically.
 

@@ -107,14 +107,39 @@ def test_unexpected_error_is_reported_to_user(monkeypatch):
 
 # ---------- URL dedup ----------
 
-def test_url_marked_only_on_success_and_resend_needs_force(monkeypatch):
-    results, seen = [True], []
+def test_links_are_never_refused_as_duplicates(monkeypatch):
+    seen = []
 
     async def fake_x(url, status_cb):
         seen.append(url)
-        return results[0]
+        return True
 
     monkeypatch.setattr(message.worker, "clone_x_media", fake_x)
+
+    async def run():
+        texts = []
+        for text in ["https://x.com/a/status/1", "https://twitter.com/a/status/1?s=20",
+                     "https://x.com/a/status/1/photo/1", "force https://x.com/a/status/1"]:
+            ev = FakeEvent(text)
+            await message.handle_message(ev)
+            await drain()
+            texts += ev.texts
+        return texts
+
+    texts = asyncio.run(run())
+    assert len(seen) == 4                                            # every one of them was downloaded
+    assert not any("Already sent" in t for t in texts)
+    assert db.get_sent_urls() == set()                               # nothing is remembered for X
+
+
+def test_instagram_posts_are_remembered_only_when_they_succeed(monkeypatch):
+    results, seen = [False], []
+
+    async def fake_ig(url, status_cb):
+        seen.append(url)
+        return results[0]
+
+    monkeypatch.setattr(message.worker, "clone_ig_media", fake_ig)
 
     async def send(text):
         ev = FakeEvent(text)
@@ -123,25 +148,14 @@ def test_url_marked_only_on_success_and_resend_needs_force(monkeypatch):
         return ev
 
     async def run():
-        results[0] = False                                   # failed download must not count as sent
-        await send("https://x.com/a/status/1")
-        assert db.get_sent_urls() == set()
-
+        await send("https://www.instagram.com/p/CxAb/")
+        assert db.get_sent_urls() == set()                           # failed: not remembered
         results[0] = True
-        await send("https://twitter.com/a/status/1?s=20")
-        assert db.get_sent_urls() == {"https://x.com/a/status/1"}
-
-        ev = await send("https://x.com/a/status/1/photo/1")  # same tweet, different spelling
-        assert len(seen) == 2 and any("Already sent" in t for t in ev.texts)
-
-        await send("force https://x.com/a/status/1")         # explicit override
-        assert len(seen) == 3
-
-        await send("https://x.com/a/status/2")               # different tweet is unaffected
-        assert len(seen) == 4
+        await send("https://www.instagram.com/p/CxAb/")
+        assert db.get_sent_urls() == {"https://instagram.com/p/CxAb"}
 
     asyncio.run(run())
-    assert json.loads((db.URLS_DB_PATH).read_text())["urls"] == ["https://x.com/a/status/1", "https://x.com/a/status/2"]
+    assert len(seen) == 2
 
 
 def test_multiline_share_with_extra_text_reaches_the_right_url(monkeypatch):
@@ -313,7 +327,7 @@ def test_unsupported_instagram_links_get_a_clear_message(monkeypatch, sent):
     assert not any("not recognized" in t for t in ev.texts)         # the old, confusing message
 
 
-def test_same_post_in_another_link_style_counts_as_already_sent(monkeypatch):
+def test_a_post_sent_again_in_another_link_style_is_sent_again(monkeypatch):
     seen = []
 
     async def fake_ig(url, status_cb):
@@ -329,10 +343,11 @@ def test_same_post_in_another_link_style_counts_as_already_sent(monkeypatch):
         return ev
 
     async def run():
-        await send("https://www.instagram.com/p/CxAb/")
-        ev = await send("https://www.instagram.com/reels/CxAb/?igsh=9")
-        assert any("Already sent" in t for t in ev.texts)
-        await send("force https://www.instagram.com/reel/CxAb/")
+        first = await send("https://www.instagram.com/p/CxAb/")
+        second = await send("https://www.instagram.com/reels/CxAb/?igsh=9")
+        third = await send("force https://www.instagram.com/reel/CxAb/")
+        return first.texts + second.texts + third.texts
 
-    asyncio.run(run())
-    assert len(seen) == 2
+    texts = asyncio.run(run())
+    assert len(seen) == 3 and not any("Already sent" in t for t in texts)
+    assert db.get_sent_urls() == {"https://instagram.com/p/CxAb"}    # one entry for the post, for profile runs

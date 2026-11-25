@@ -21,22 +21,23 @@ TIKTOK_RE = re.compile(r"https?://(?:www\.|vm\.|vt\.)?tiktok\.com/\S+")
 def _site_job(arg: str, force: bool):
     """Which download job a link belongs to, or None.
 
-    -> (task key, label, run(status_cb) -> coroutine, dedup). `dedup` is False for jobs that are never
-    "done" (a profile can always have older posts left), so their link is never refused as a duplicate.
+    -> (task key, label, run(status_cb) -> coroutine, url to remember once the job succeeded or None).
+    Links are never refused as duplicates. Instagram posts are remembered only so that a later run
+    over a whole profile skips posts that were already sent.
     """
     m = X_RE.search(arg)
     if m:
-        return f"x_{m.group(2)}", "X", lambda cb: worker.clone_x_media(arg, cb), True
+        return f"x_{m.group(2)}", "X", lambda cb: worker.clone_x_media(arg, cb), None
     m = IG_POST_RE.search(arg)
     if m:
-        return f"ig_{m.group(1)}", "Instagram", lambda cb: worker.clone_ig_media(arg, cb), True
+        return f"ig_{m.group(1)}", "Instagram", lambda cb: worker.clone_ig_media(arg, cb), normalize_url(arg)
     username = instagram_profile(arg)
     if username:
         return (f"igprofile_{username.lower()}", "Instagram profile",
-                lambda cb: worker.clone_ig_profile(username, cb, force=force), False)
+                lambda cb: worker.clone_ig_profile(username, cb, force=force), None)
     if TIKTOK_RE.search(arg):
         digest = hashlib.md5(normalize_url(arg).encode()).hexdigest()[:12]
-        return f"tiktok_{digest}", "TikTok", lambda cb: worker.clone_tiktok_media(arg, cb), True
+        return f"tiktok_{digest}", "TikTok", lambda cb: worker.clone_tiktok_media(arg, cb), None
     return None
 
 
@@ -76,20 +77,14 @@ async def handle_message(event: events.NewMessage.Event):
     # --- X / Instagram / TikTok ---
     site = _site_job(arg, wants_force(raw))
     if site:
-        key, label, run, dedup = site
+        key, label, run, remember_url = site
         if jobs.is_running(key):
             await event.reply(f"⚠️ This {label} link is already being downloaded...")
             return
         on_success = None
-        if dedup:
-            norm = normalize_url(arg)
-            sent = db.get_sent_urls()
-            if not wants_force(raw) and (norm in sent or arg in sent):
-                await status_cb(f"ℹ️ Already sent before: `{arg}`\nSend `force {arg}` to send it again")
-                return
-
+        if remember_url:
             async def mark_sent():
-                await db.mark_url_sent(norm)
+                await db.mark_url_sent(remember_url)
 
             on_success = mark_sent
 
